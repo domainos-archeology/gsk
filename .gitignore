@@ -1,1 +1,9 @@
 .direnv/
+
+# Downloaded Ghidra installation
+.ghidra/
+
+# Gradle build artifacts
+ghidra-plugin/build/
+ghidra-plugin/.gradle/
+ghidra-plugin/dist/

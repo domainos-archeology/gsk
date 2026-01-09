@@ -7,6 +7,9 @@ import com.sun.net.httpserver.HttpServer;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.services.GoToService;
+import ghidra.framework.model.DomainObjectChangedEvent;
+import ghidra.framework.model.DomainObjectChangeRecord;
+import ghidra.framework.model.DomainObjectListener;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
@@ -15,6 +18,7 @@ import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
 import ghidra.program.util.ProgramLocation;
+import ghidra.framework.model.EventType;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
@@ -108,22 +112,17 @@ public class GhidraHTTPServer {
 
     private void processChangeRecord(DomainObjectChangeRecord record) {
         long timestamp = System.currentTimeMillis();
-        String changeType = getChangeTypeName(record.getEventType());
+        EventType eventType = record.getEventType();
+        String changeType = eventType.toString().toLowerCase();
         String details = "";
         String address = "";
 
-        if (record instanceof ProgramChangeRecord) {
-            ProgramChangeRecord pcr = (ProgramChangeRecord) record;
-            if (pcr.getStart() != null) {
-                address = pcr.getStart().toString();
-            }
-            Object oldValue = pcr.getOldValue();
-            Object newValue = pcr.getNewValue();
-            if (oldValue != null || newValue != null) {
-                details = String.format("Old: %s, New: %s",
-                    oldValue != null ? oldValue.toString() : "null",
-                    newValue != null ? newValue.toString() : "null");
-            }
+        Object oldValue = record.getOldValue();
+        Object newValue = record.getNewValue();
+        if (oldValue != null || newValue != null) {
+            details = String.format("Old: %s, New: %s",
+                oldValue != null ? oldValue.toString() : "null",
+                newValue != null ? newValue.toString() : "null");
         }
 
         ChangeRecord cr = new ChangeRecord(timestamp, changeType, address, details);
@@ -132,32 +131,6 @@ public class GhidraHTTPServer {
         // Keep only last 1000 changes
         while (changeHistory.size() > 1000) {
             changeHistory.poll();
-        }
-    }
-
-    private String getChangeTypeName(int eventType) {
-        // Map common event types to readable names
-        switch (eventType) {
-            case ChangeManager.DOCR_SYMBOL_RENAMED:
-                return "symbol_renamed";
-            case ChangeManager.DOCR_SYMBOL_ADDED:
-                return "symbol_added";
-            case ChangeManager.DOCR_SYMBOL_REMOVED:
-                return "symbol_removed";
-            case ChangeManager.DOCR_CODE_ADDED:
-                return "code_added";
-            case ChangeManager.DOCR_CODE_REMOVED:
-                return "code_removed";
-            case ChangeManager.DOCR_FUNCTION_CHANGED:
-                return "function_changed";
-            case ChangeManager.DOCR_FUNCTION_ADDED:
-                return "function_added";
-            case ChangeManager.DOCR_FUNCTION_REMOVED:
-                return "function_removed";
-            case ChangeManager.DOCR_COMMENT_CHANGED:
-                return "comment_changed";
-            default:
-                return "change_" + eventType;
         }
     }
 
@@ -484,11 +457,11 @@ public class GhidraHTTPServer {
 
             StringBuilder sb = new StringBuilder();
             ReferenceManager refMgr = program.getReferenceManager();
-            Reference[] refs = refMgr.getReferencesTo(address);
+            ReferenceIterator refs = refMgr.getReferencesTo(address);
 
             int count = 0;
-            for (Reference ref : refs) {
-                if (count >= limit) break;
+            while (refs.hasNext() && count < limit) {
+                Reference ref = refs.next();
                 sb.append(String.format("%s -> %s (%s)\n",
                     ref.getFromAddress(),
                     ref.getToAddress(),
@@ -902,8 +875,11 @@ public class GhidraHTTPServer {
             try {
                 int txId = program.startTransaction("Set decompiler comment");
                 try {
-                    // PRE_COMMENT is shown in decompiler view
-                    program.getListing().setComment(address, CodeUnit.PRE_COMMENT, comment);
+                    // Set PRE comment which is shown in decompiler view
+                    CodeUnit cu = program.getListing().getCodeUnitAt(address);
+                    if (cu != null) {
+                        cu.setComment(CodeUnit.PRE_COMMENT, comment);
+                    }
                     program.endTransaction(txId, true);
                     sendResponse(exchange, 200, "Decompiler comment set at: " + addressStr);
                 } catch (Exception e) {
@@ -946,8 +922,11 @@ public class GhidraHTTPServer {
             try {
                 int txId = program.startTransaction("Set disassembly comment");
                 try {
-                    // EOL_COMMENT is shown in disassembly view
-                    program.getListing().setComment(address, CodeUnit.EOL_COMMENT, comment);
+                    // Set EOL comment which is shown in disassembly view
+                    CodeUnit cu = program.getListing().getCodeUnitAt(address);
+                    if (cu != null) {
+                        cu.setComment(CodeUnit.EOL_COMMENT, comment);
+                    }
                     program.endTransaction(txId, true);
                     sendResponse(exchange, 200, "Disassembly comment set at: " + addressStr);
                 } catch (Exception e) {

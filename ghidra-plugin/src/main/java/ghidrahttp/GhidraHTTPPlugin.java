@@ -21,7 +21,7 @@ import ghidra.util.Msg;
 @PluginInfo(
     status = PluginStatus.STABLE,
     packageName = "GhidraHTTP",
-    category = PluginCategoryNames.MISC,
+    category = PluginCategoryNames.COMMON,
     shortDescription = "HTTP API for Ghidra",
     description = "Provides an HTTP API server for remote access to Ghidra analysis features including decompilation, disassembly, cross-references, and more."
 )
