@@ -1,6 +1,6 @@
-module domainos-archeology/ghidra-skill/v2
+module github.com/domainos-archeology/ghidra-skill
 
-go 1.21.0
+go 1.25.0
 
 require (
 	github.com/spf13/cobra v1.8.0

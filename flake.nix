@@ -1,8 +1,8 @@
 {
-  description = "ghidra-gsk (gsk) - a command line for interfacing with ghidra"
+  description = "ghidra-gsk (gsk) - a command line for interfacing with ghidra";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
