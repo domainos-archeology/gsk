@@ -26,9 +26,27 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
+// Repositories for test dependencies
+repositories {
+    mavenCentral()
+}
+
 // Dependencies
 dependencies {
     // Ghidra provides its own dependencies through the buildExtension.gradle
+
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    testImplementation 'org.mockito:mockito-core:5.5.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Enable JUnit 5
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
 }
 
 // Extension metadata

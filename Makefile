@@ -4,6 +4,10 @@
 #   make build        - Download Ghidra (if needed) and build the plugin
 #   make plugin       - Build just the plugin (requires Ghidra already downloaded)
 #   make download     - Download and extract Ghidra
+#   make test         - Run all tests (Go + Java)
+#   make test-go      - Run Go tests only
+#   make test-java    - Run Java tests only
+#   make test-cover   - Run Go tests with coverage report
 #   make clean        - Remove build artifacts
 #   make distclean    - Remove build artifacts and downloaded Ghidra
 
@@ -20,7 +24,7 @@ else
     DOWNLOAD_CMD = wget -O
 endif
 
-.PHONY: all build plugin download clean distclean check-ghidra info
+.PHONY: all build plugin download clean distclean check-ghidra info test test-go test-java test-cover
 
 all: build
 
@@ -107,4 +111,29 @@ clean:
 distclean: clean
 	@echo "==> Removing downloaded Ghidra..."
 	rm -rf $(GHIDRA_DIR)
+	@echo "==> Done"
+
+# Run all tests
+test: test-go test-java
+
+# Run Go tests
+test-go:
+	@echo "==> Running Go tests..."
+	go test ./... -v
+	@echo "==> Done"
+
+# Run Go tests with coverage
+test-cover:
+	@echo "==> Running Go tests with coverage..."
+	go test ./... -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "==> Coverage report: coverage.html"
+	@go tool cover -func=coverage.out | tail -1
+
+# Run Java tests (requires Ghidra to be downloaded)
+test-java: check-ghidra
+	@echo "==> Running Java tests..."
+	@GHIDRA_INSTALL=$$(cd $(GHIDRA_DIR) && find . -maxdepth 1 -type d -name 'ghidra_*' | head -1 | sed 's|^\./||'); \
+	GHIDRA_ABS_PATH="$$(pwd)/$(GHIDRA_DIR)/$$GHIDRA_INSTALL"; \
+	cd $(PLUGIN_DIR) && GHIDRA_INSTALL_DIR="$$GHIDRA_ABS_PATH" gradle test
 	@echo "==> Done"

@@ -7,3 +7,7 @@
 ghidra-plugin/build/
 ghidra-plugin/.gradle/
 ghidra-plugin/dist/
+
+# Test coverage
+coverage.out
+coverage.html
