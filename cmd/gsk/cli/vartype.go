@@ -2,11 +2,7 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -28,21 +24,11 @@ func init() {
 }
 
 func setVarType(functionAddr, varName, newType string) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/set_local_variable_type", server)
-	
-	data := url.Values{}
-	data.Set("function_address", functionAddr)
-	data.Set("variable_name", varName)
-	data.Set("new_type", newType)
-	
-	resp, err := http.Post(apiURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	client := newClient()
+	body, err := client.SetLocalVariableType(functionAddr, varName, newType)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

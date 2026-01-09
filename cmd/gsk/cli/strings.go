@@ -2,9 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -27,20 +24,11 @@ func init() {
 }
 
 func listStrings(filter string, limit int) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/strings?limit=%d", server, limit)
-	
-	if filter != "" {
-		apiURL += fmt.Sprintf("&filter=%s", url.QueryEscape(filter))
-	}
-	
-	resp, err := http.Get(apiURL)
+	client := newClient()
+	body, err := client.Strings(filter, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

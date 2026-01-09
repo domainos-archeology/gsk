@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,7 +19,7 @@ var changesCmd = &cobra.Command{
 		since, _ := cmd.Flags().GetInt64("since")
 		limit, _ := cmd.Flags().GetInt("limit")
 		watch, _ := cmd.Flags().GetBool("watch")
-		
+
 		if watch {
 			watchChanges(limit)
 		} else {
@@ -38,88 +36,73 @@ func init() {
 }
 
 func getChanges(since int64, limit int) {
-	// If since is 0, try to read from saved timestamp
 	if since == 0 {
 		since = getLastCheckTimestamp()
 	}
-	
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/changes_since?since=%d&limit=%d", server, since, limit)
-	
-	resp, err := http.Get(url)
+
+	client := newClient()
+	body, err := client.ChangesSince(since, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
+
 	output := string(body)
-	
 	if strings.Contains(output, "No changes since") {
 		fmt.Println("No changes detected")
 	} else {
 		fmt.Print(output)
 	}
-	
-	// Save current timestamp for next check
+
 	saveLastCheckTimestamp(time.Now().UnixMilli())
 }
 
 func watchChanges(limit int) {
 	fmt.Println("Watching for changes (Ctrl+C to stop)...")
-	
+
 	lastCheck := time.Now().UnixMilli()
-	
+	client := newClient()
+
 	for {
 		time.Sleep(2 * time.Second)
-		
-		server := getGhidraServer()
-		url := fmt.Sprintf("http://%s/changes_since?since=%d&limit=%d", 
-			server, lastCheck, limit)
-		
-		resp, err := http.Get(url)
+
+		body, err := client.ChangesSince(lastCheck, limit)
 		if err != nil {
 			continue
 		}
-		
-		body, _ := ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-		
+
 		output := string(body)
 		if !strings.Contains(output, "No changes since") {
 			fmt.Print(output)
 		}
-		
+
 		lastCheck = time.Now().UnixMilli()
 	}
 }
 
 func getLastCheckTimestamp() int64 {
 	timestampFile := getTimestampFilePath()
-	
-	data, err := ioutil.ReadFile(timestampFile)
+
+	data, err := os.ReadFile(timestampFile)
 	if err != nil {
-		// File doesn't exist, return 0 (get all changes)
 		return 0
 	}
-	
+
 	timestamp, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
 		return 0
 	}
-	
+
 	return timestamp
 }
 
 func saveLastCheckTimestamp(timestamp int64) {
 	timestampFile := getTimestampFilePath()
-	
-	// Ensure directory exists
+
 	os.MkdirAll(filepath.Dir(timestampFile), 0755)
-	
+
 	data := fmt.Sprintf("%d", timestamp)
-	ioutil.WriteFile(timestampFile, []byte(data), 0644)
+	os.WriteFile(timestampFile, []byte(data), 0644)
 }
 
 func getTimestampFilePath() string {

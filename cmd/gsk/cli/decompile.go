@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -25,21 +23,11 @@ func init() {
 }
 
 func decompileFunction(address string) {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/decompile_function?address=%s", server, address)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.DecompileFunction(address)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading response: %v\n", err)
-		os.Exit(1)
-	}
-	
 	fmt.Println(string(body))
 }

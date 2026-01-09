@@ -2,11 +2,7 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -27,20 +23,11 @@ func init() {
 }
 
 func renameFunction(address, newName string) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/rename_function_by_address", server)
-	
-	data := url.Values{}
-	data.Set("function_address", address)
-	data.Set("new_name", newName)
-	
-	resp, err := http.Post(apiURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	client := newClient()
+	body, err := client.RenameFunction(address, newName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

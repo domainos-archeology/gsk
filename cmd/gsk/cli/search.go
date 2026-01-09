@@ -2,9 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -27,17 +24,11 @@ func init() {
 }
 
 func searchFunctions(query string, limit int) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/searchFunctions?query=%s&limit=%d", 
-		server, url.QueryEscape(query), limit)
-	
-	resp, err := http.Get(apiURL)
+	client := newClient()
+	body, err := client.SearchFunctions(query, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

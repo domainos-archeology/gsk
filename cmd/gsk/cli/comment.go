@@ -2,9 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
@@ -45,39 +42,21 @@ func init() {
 }
 
 func setDecompilerComment(address, comment string) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/set_decompiler_comment", server)
-	
-	data := url.Values{}
-	data.Set("address", address)
-	data.Set("comment", comment)
-	
-	resp, err := http.Post(apiURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	client := newClient()
+	body, err := client.SetDecompilerComment(address, comment)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
 
 func setDisassemblyComment(address, comment string) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/set_disassembly_comment", server)
-	
-	data := url.Values{}
-	data.Set("address", address)
-	data.Set("comment", comment)
-	
-	resp, err := http.Post(apiURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	client := newClient()
+	body, err := client.SetDisassemblyComment(address, comment)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

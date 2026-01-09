@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -39,38 +37,28 @@ var xrefsFromCmd = &cobra.Command{
 func init() {
 	xrefsToCmd.Flags().IntP("limit", "l", 100, "Maximum number of results")
 	xrefsFromCmd.Flags().IntP("limit", "l", 100, "Maximum number of results")
-	
+
 	xrefsCmd.AddCommand(xrefsToCmd)
 	xrefsCmd.AddCommand(xrefsFromCmd)
 	rootCmd.AddCommand(xrefsCmd)
 }
 
 func getXrefsTo(address string, limit int) {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/xrefs_to?address=%s&limit=%d", server, address, limit)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.XrefsTo(address, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
 
 func getXrefsFrom(address string, limit int) {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/xrefs_from?address=%s&limit=%d", server, address, limit)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.XrefsFrom(address, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

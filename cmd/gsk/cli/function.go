@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -48,46 +46,31 @@ func init() {
 }
 
 func getFunctionByAddress(address string) {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/get_function_by_address?address=%s", server, address)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.GetFunctionByAddress(address)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
 
 func getCurrentFunction() {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/get_current_function", server)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.GetCurrentFunction()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
 
 func listFunctions() {
-	server := getGhidraServer()
-	url := fmt.Sprintf("http://%s/list_functions", server)
-	
-	resp, err := http.Get(url)
+	client := newClient()
+	body, err := client.ListFunctions()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }

@@ -2,9 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
@@ -28,20 +25,11 @@ func init() {
 }
 
 func setPrototype(address, prototype string) {
-	server := getGhidraServer()
-	apiURL := fmt.Sprintf("http://%s/set_function_prototype", server)
-	
-	data := url.Values{}
-	data.Set("function_address", address)
-	data.Set("prototype", prototype)
-	
-	resp, err := http.Post(apiURL, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+	client := newClient()
+	body, err := client.SetFunctionPrototype(address, prototype)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	
-	body, _ := ioutil.ReadAll(resp.Body)
 	fmt.Println(string(body))
 }
