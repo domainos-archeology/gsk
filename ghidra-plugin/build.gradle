@@ -1,0 +1,37 @@
+// Ghidra HTTP API Plugin build configuration
+//
+// To build:
+//   1. Set GHIDRA_INSTALL_DIR environment variable to your Ghidra installation
+//   2. Run: gradle buildExtension
+//
+// The built extension will be in: dist/ghidra_<version>_PUBLIC_<date>_GhidraHTTP.zip
+
+plugins {
+    id 'java'
+}
+
+// Check for Ghidra installation directory
+def ghidraInstallDir = System.env.GHIDRA_INSTALL_DIR ?: file("${System.getProperty('user.home')}/ghidra").absolutePath
+
+if (!file(ghidraInstallDir).exists()) {
+    throw new GradleException("GHIDRA_INSTALL_DIR is not set or Ghidra not found at: ${ghidraInstallDir}")
+}
+
+// Apply Ghidra's buildExtension script
+apply from: new File(ghidraInstallDir, "support/buildExtension.gradle")
+
+// Java version
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+// Dependencies
+dependencies {
+    // Ghidra provides its own dependencies through the buildExtension.gradle
+}
+
+// Extension metadata
+ext {
+    ghidraVersion = project.hasProperty('GHIDRA_VERSION') ? project.GHIDRA_VERSION : 'latest'
+}
