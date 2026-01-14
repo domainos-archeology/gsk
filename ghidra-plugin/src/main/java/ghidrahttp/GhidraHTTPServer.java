@@ -1523,8 +1523,85 @@ public class GhidraHTTPServer {
         return "primitive";
     }
 
+    // Helper class to hold parsed array information
+    private static class ArrayTypeInfo {
+        final String baseTypeName;
+        final List<Integer> dimensions;
+
+        ArrayTypeInfo(String baseTypeName, List<Integer> dimensions) {
+            this.baseTypeName = baseTypeName;
+            this.dimensions = dimensions;
+        }
+    }
+
+    // Parse array syntax from type name, e.g., "byte[16]" or "int[4][4]"
+    // Returns null if not an array type
+    private ArrayTypeInfo parseArraySyntax(String typeName) {
+        if (!typeName.contains("[") || !typeName.endsWith("]")) {
+            return null;
+        }
+
+        // Find where array dimensions start
+        int firstBracket = typeName.indexOf('[');
+        String baseType = typeName.substring(0, firstBracket).trim();
+        String dimensionsPart = typeName.substring(firstBracket);
+
+        // Parse all dimensions like [4][16][32]
+        List<Integer> dimensions = new ArrayList<>();
+        int i = 0;
+        while (i < dimensionsPart.length()) {
+            if (dimensionsPart.charAt(i) != '[') {
+                return null; // Invalid format
+            }
+            int closeIdx = dimensionsPart.indexOf(']', i);
+            if (closeIdx < 0) {
+                return null; // Missing closing bracket
+            }
+            String sizeStr = dimensionsPart.substring(i + 1, closeIdx).trim();
+            try {
+                dimensions.add(Integer.parseInt(sizeStr));
+            } catch (NumberFormatException e) {
+                return null; // Invalid dimension
+            }
+            i = closeIdx + 1;
+        }
+
+        if (dimensions.isEmpty()) {
+            return null;
+        }
+
+        return new ArrayTypeInfo(baseType, dimensions);
+    }
+
+    // Create a DataType, handling array syntax if present
+    private DataType createFieldType(String typeName, DataTypeManager dtm) {
+        ArrayTypeInfo arrayInfo = parseArraySyntax(typeName);
+        if (arrayInfo == null) {
+            // Not an array, just find the type directly
+            return findDataType(dtm, typeName);
+        }
+
+        // Find the base type
+        DataType baseType = findDataType(dtm, arrayInfo.baseTypeName);
+        if (baseType == null) {
+            return null;
+        }
+
+        // Build array type from innermost to outermost
+        // For int[4][16], we want: ArrayDataType(ArrayDataType(int, 16), 4)
+        // So we process dimensions in reverse order
+        DataType currentType = baseType;
+        for (int i = arrayInfo.dimensions.size() - 1; i >= 0; i--) {
+            int size = arrayInfo.dimensions.get(i);
+            currentType = new ArrayDataType(currentType, size, currentType.getLength());
+        }
+
+        return currentType;
+    }
+
     private void parseStructDefinition(Structure struct, String definition, DataTypeManager dtm) {
         // Parse format: "type1 name1; type2 name2; ..."
+        // Also supports array syntax: "byte[16] padding; int[4][4] matrix"
         String[] fields = definition.split(";");
         for (String field : fields) {
             field = field.trim();
@@ -1536,7 +1613,7 @@ public class GhidraHTTPServer {
             String typeName = field.substring(0, lastSpace).trim();
             String fieldName = field.substring(lastSpace + 1).trim();
 
-            DataType fieldType = findDataType(dtm, typeName);
+            DataType fieldType = createFieldType(typeName, dtm);
             if (fieldType != null) {
                 struct.add(fieldType, fieldName, null);
             }
@@ -1545,6 +1622,7 @@ public class GhidraHTTPServer {
 
     private void parseUnionDefinition(Union union, String definition, DataTypeManager dtm) {
         // Parse format: "type1 name1; type2 name2; ..."
+        // Also supports array syntax: "byte[16] padding; int[4][4] matrix"
         String[] fields = definition.split(";");
         for (String field : fields) {
             field = field.trim();
@@ -1556,7 +1634,7 @@ public class GhidraHTTPServer {
             String typeName = field.substring(0, lastSpace).trim();
             String fieldName = field.substring(lastSpace + 1).trim();
 
-            DataType fieldType = findDataType(dtm, typeName);
+            DataType fieldType = createFieldType(typeName, dtm);
             if (fieldType != null) {
                 union.add(fieldType, fieldName, null);
             }
