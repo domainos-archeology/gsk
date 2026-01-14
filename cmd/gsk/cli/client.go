@@ -146,6 +146,91 @@ func (c *GhidraClient) SetDisassemblyComment(address, comment string) ([]byte, e
 	return c.post("/set_disassembly_comment", data)
 }
 
+// Type-related methods
+
+// ListTypes returns all data types in the program.
+func (c *GhidraClient) ListTypes(category string, limit int) ([]byte, error) {
+	endpoint := fmt.Sprintf("/list_types?limit=%d", limit)
+	if category != "" {
+		endpoint += fmt.Sprintf("&category=%s", url.QueryEscape(category))
+	}
+	return c.get(endpoint)
+}
+
+// GetType returns detailed information about a specific type.
+func (c *GhidraClient) GetType(name string) ([]byte, error) {
+	return c.get(fmt.Sprintf("/get_type?name=%s", url.QueryEscape(name)))
+}
+
+// SearchTypes searches for types by name.
+func (c *GhidraClient) SearchTypes(query string, limit int) ([]byte, error) {
+	return c.get(fmt.Sprintf("/search_types?query=%s&limit=%d", url.QueryEscape(query), limit))
+}
+
+// CreateType creates a new data type.
+func (c *GhidraClient) CreateType(name, kind, definition string) ([]byte, error) {
+	data := url.Values{}
+	data.Set("name", name)
+	data.Set("kind", kind)
+	if definition != "" {
+		data.Set("definition", definition)
+	}
+	return c.post("/create_type", data)
+}
+
+// UpdateType updates an existing data type.
+func (c *GhidraClient) UpdateType(name, newName, definition string) ([]byte, error) {
+	data := url.Values{}
+	data.Set("name", name)
+	if newName != "" {
+		data.Set("new_name", newName)
+	}
+	if definition != "" {
+		data.Set("definition", definition)
+	}
+	return c.post("/update_type", data)
+}
+
+// Equate-related methods
+
+// ListEquates returns all equates in the program.
+func (c *GhidraClient) ListEquates(limit int) ([]byte, error) {
+	return c.get(fmt.Sprintf("/list_equates?limit=%d", limit))
+}
+
+// GetEquate returns detailed information about a specific equate.
+func (c *GhidraClient) GetEquate(name string) ([]byte, error) {
+	return c.get(fmt.Sprintf("/get_equate?name=%s", url.QueryEscape(name)))
+}
+
+// GetEquateByValue returns the equate with the given value.
+func (c *GhidraClient) GetEquateByValue(value string) ([]byte, error) {
+	return c.get(fmt.Sprintf("/get_equate?value=%s", url.QueryEscape(value)))
+}
+
+// SetEquate creates or updates an equate.
+func (c *GhidraClient) SetEquate(name, value, address string, operand int) ([]byte, error) {
+	data := url.Values{}
+	data.Set("name", name)
+	data.Set("value", value)
+	if address != "" {
+		data.Set("address", address)
+		data.Set("operand", fmt.Sprintf("%d", operand))
+	}
+	return c.post("/set_equate", data)
+}
+
+// DeleteEquate deletes an equate or removes a reference.
+func (c *GhidraClient) DeleteEquate(name, address string, operand int) ([]byte, error) {
+	data := url.Values{}
+	data.Set("name", name)
+	if address != "" {
+		data.Set("address", address)
+		data.Set("operand", fmt.Sprintf("%d", operand))
+	}
+	return c.post("/delete_equate", data)
+}
+
 // newClient creates a GhidraClient using the configured server address.
 func newClient() *GhidraClient {
 	return NewGhidraClient(getGhidraServer())

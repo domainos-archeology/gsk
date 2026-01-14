@@ -497,6 +497,371 @@ func TestNetworkError(t *testing.T) {
 	}
 }
 
+// Type-related tests
+
+func TestListTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		category string
+		limit    int
+		wantPath string
+	}{
+		{
+			name:     "no category",
+			category: "",
+			limit:    1000,
+			wantPath: "/list_types?limit=1000",
+		},
+		{
+			name:     "with category",
+			category: "structs",
+			limit:    100,
+			wantPath: "/list_types?limit=100&category=structs",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedURL string
+			ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+				capturedURL = r.URL.String()
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("/MyStruct\tMyStruct\tstruct\t16"))
+			})
+			defer ts.Close()
+
+			client := clientFromTestServer(ts)
+			_, err := client.ListTypes(tt.category, tt.limit)
+			if err != nil {
+				t.Fatalf("ListTypes() error = %v", err)
+			}
+			if capturedURL != tt.wantPath {
+				t.Errorf("URL = %s, want %s", capturedURL, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestGetType(t *testing.T) {
+	response := "Name: MyStruct\nPath: /MyStruct\nKind: struct"
+	ts := testServer(t, "/get_type", response, http.StatusOK)
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	got, err := client.GetType("MyStruct")
+	if err != nil {
+		t.Fatalf("GetType() error = %v", err)
+	}
+	if string(got) != response {
+		t.Errorf("GetType() = %s, want %s", got, response)
+	}
+}
+
+func TestGetTypeURLConstruction(t *testing.T) {
+	var capturedURL string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	client.GetType("My Struct")
+
+	expected := "/get_type?name=My+Struct"
+	if capturedURL != expected {
+		t.Errorf("URL = %s, want %s", capturedURL, expected)
+	}
+}
+
+func TestSearchTypes(t *testing.T) {
+	var capturedURL string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("/Point\tPoint\tstruct\t8"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	_, err := client.SearchTypes("Point", 50)
+	if err != nil {
+		t.Fatalf("SearchTypes() error = %v", err)
+	}
+
+	expected := "/search_types?query=Point&limit=50"
+	if capturedURL != expected {
+		t.Errorf("URL = %s, want %s", capturedURL, expected)
+	}
+}
+
+func TestCreateType(t *testing.T) {
+	var capturedBody url.Values
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("Method = %s, want POST", r.Method)
+		}
+		capturedBody, _ = url.ParseQuery(readBody(r))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Created type: /MyStruct"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	got, err := client.CreateType("MyStruct", "struct", "int x; int y")
+	if err != nil {
+		t.Fatalf("CreateType() error = %v", err)
+	}
+	if string(got) != "Created type: /MyStruct" {
+		t.Errorf("CreateType() = %s, want Created type: /MyStruct", got)
+	}
+	if capturedBody.Get("name") != "MyStruct" {
+		t.Errorf("name = %s, want MyStruct", capturedBody.Get("name"))
+	}
+	if capturedBody.Get("kind") != "struct" {
+		t.Errorf("kind = %s, want struct", capturedBody.Get("kind"))
+	}
+	if capturedBody.Get("definition") != "int x; int y" {
+		t.Errorf("definition = %s, want int x; int y", capturedBody.Get("definition"))
+	}
+}
+
+func TestCreateTypedef(t *testing.T) {
+	var capturedBody url.Values
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = url.ParseQuery(readBody(r))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Created type: /DWORD"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	got, err := client.CreateType("DWORD", "typedef", "uint")
+	if err != nil {
+		t.Fatalf("CreateType() error = %v", err)
+	}
+	if string(got) != "Created type: /DWORD" {
+		t.Errorf("CreateType() = %s, want Created type: /DWORD", got)
+	}
+	if capturedBody.Get("kind") != "typedef" {
+		t.Errorf("kind = %s, want typedef", capturedBody.Get("kind"))
+	}
+	if capturedBody.Get("definition") != "uint" {
+		t.Errorf("definition = %s, want uint", capturedBody.Get("definition"))
+	}
+}
+
+func TestUpdateType(t *testing.T) {
+	var capturedBody url.Values
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("Method = %s, want POST", r.Method)
+		}
+		capturedBody, _ = url.ParseQuery(readBody(r))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Updated type: /MyStruct"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	got, err := client.UpdateType("MyStruct", "RenamedStruct", "int x; int y; int z")
+	if err != nil {
+		t.Fatalf("UpdateType() error = %v", err)
+	}
+	if string(got) != "Updated type: /MyStruct" {
+		t.Errorf("UpdateType() = %s, want Updated type: /MyStruct", got)
+	}
+	if capturedBody.Get("name") != "MyStruct" {
+		t.Errorf("name = %s, want MyStruct", capturedBody.Get("name"))
+	}
+	if capturedBody.Get("new_name") != "RenamedStruct" {
+		t.Errorf("new_name = %s, want RenamedStruct", capturedBody.Get("new_name"))
+	}
+	if capturedBody.Get("definition") != "int x; int y; int z" {
+		t.Errorf("definition = %s, want int x; int y; int z", capturedBody.Get("definition"))
+	}
+}
+
+// Equate-related tests
+
+func TestListEquates(t *testing.T) {
+	var capturedURL string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("STATUS_OK\t0x0\t5 refs"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	_, err := client.ListEquates(500)
+	if err != nil {
+		t.Fatalf("ListEquates() error = %v", err)
+	}
+
+	expected := "/list_equates?limit=500"
+	if capturedURL != expected {
+		t.Errorf("URL = %s, want %s", capturedURL, expected)
+	}
+}
+
+func TestGetEquate(t *testing.T) {
+	response := "Name: STATUS_OK\nValue: 0 (0x0)\nReference Count: 5"
+	ts := testServer(t, "/get_equate", response, http.StatusOK)
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	got, err := client.GetEquate("STATUS_OK")
+	if err != nil {
+		t.Fatalf("GetEquate() error = %v", err)
+	}
+	if string(got) != response {
+		t.Errorf("GetEquate() = %s, want %s", got, response)
+	}
+}
+
+func TestGetEquateByValue(t *testing.T) {
+	var capturedURL string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Name: MAX_SIZE\nValue: 256"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts)
+	_, err := client.GetEquateByValue("0x100")
+	if err != nil {
+		t.Fatalf("GetEquateByValue() error = %v", err)
+	}
+
+	expected := "/get_equate?value=0x100"
+	if capturedURL != expected {
+		t.Errorf("URL = %s, want %s", capturedURL, expected)
+	}
+}
+
+func TestSetEquate(t *testing.T) {
+	tests := []struct {
+		name       string
+		eqName     string
+		value      string
+		address    string
+		operand    int
+		wantFields map[string]string
+	}{
+		{
+			name:    "global equate",
+			eqName:  "STATUS_OK",
+			value:   "0",
+			address: "",
+			operand: 0,
+			wantFields: map[string]string{
+				"name":  "STATUS_OK",
+				"value": "0",
+			},
+		},
+		{
+			name:    "equate at address",
+			eqName:  "MAX_SIZE",
+			value:   "0x100",
+			address: "0x401234",
+			operand: 1,
+			wantFields: map[string]string{
+				"name":    "MAX_SIZE",
+				"value":   "0x100",
+				"address": "0x401234",
+				"operand": "1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedBody url.Values
+			ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" {
+					t.Errorf("Method = %s, want POST", r.Method)
+				}
+				capturedBody, _ = url.ParseQuery(readBody(r))
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("Equate set"))
+			})
+			defer ts.Close()
+
+			client := clientFromTestServer(ts)
+			_, err := client.SetEquate(tt.eqName, tt.value, tt.address, tt.operand)
+			if err != nil {
+				t.Fatalf("SetEquate() error = %v", err)
+			}
+
+			for k, v := range tt.wantFields {
+				if capturedBody.Get(k) != v {
+					t.Errorf("%s = %s, want %s", k, capturedBody.Get(k), v)
+				}
+			}
+		})
+	}
+}
+
+func TestDeleteEquate(t *testing.T) {
+	tests := []struct {
+		name       string
+		eqName     string
+		address    string
+		operand    int
+		wantFields map[string]string
+	}{
+		{
+			name:    "delete entire equate",
+			eqName:  "STATUS_OK",
+			address: "",
+			operand: 0,
+			wantFields: map[string]string{
+				"name": "STATUS_OK",
+			},
+		},
+		{
+			name:    "delete reference",
+			eqName:  "MAX_SIZE",
+			address: "0x401234",
+			operand: 1,
+			wantFields: map[string]string{
+				"name":    "MAX_SIZE",
+				"address": "0x401234",
+				"operand": "1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedBody url.Values
+			ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" {
+					t.Errorf("Method = %s, want POST", r.Method)
+				}
+				capturedBody, _ = url.ParseQuery(readBody(r))
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("Equate deleted"))
+			})
+			defer ts.Close()
+
+			client := clientFromTestServer(ts)
+			_, err := client.DeleteEquate(tt.eqName, tt.address, tt.operand)
+			if err != nil {
+				t.Fatalf("DeleteEquate() error = %v", err)
+			}
+
+			for k, v := range tt.wantFields {
+				if capturedBody.Get(k) != v {
+					t.Errorf("%s = %s, want %s", k, capturedBody.Get(k), v)
+				}
+			}
+		})
+	}
+}
+
 // Helper function to read request body
 func readBody(r *http.Request) string {
 	body := make([]byte, r.ContentLength)

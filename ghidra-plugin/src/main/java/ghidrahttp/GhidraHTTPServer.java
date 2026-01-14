@@ -13,8 +13,8 @@ import ghidra.framework.model.DomainObjectListener;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
-import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.DataTypeManager;
+import ghidra.program.model.data.*;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
 import ghidra.program.util.ProgramLocation;
@@ -147,6 +147,19 @@ public class GhidraHTTPServer {
         server.createContext("/strings", new StringsHandler());
         server.createContext("/searchFunctions", new SearchFunctionsHandler());
         server.createContext("/changes_since", new ChangesSinceHandler());
+
+        // Type endpoints
+        server.createContext("/list_types", new ListTypesHandler());
+        server.createContext("/get_type", new GetTypeHandler());
+        server.createContext("/search_types", new SearchTypesHandler());
+        server.createContext("/create_type", new CreateTypeHandler());
+        server.createContext("/update_type", new UpdateTypeHandler());
+
+        // Equate endpoints
+        server.createContext("/list_equates", new ListEquatesHandler());
+        server.createContext("/get_equate", new GetEquateHandler());
+        server.createContext("/set_equate", new SetEquateHandler());
+        server.createContext("/delete_equate", new DeleteEquateHandler());
 
         // POST endpoints
         server.createContext("/set_function_prototype", new SetFunctionPrototypeHandler());
@@ -936,6 +949,664 @@ public class GhidraHTTPServer {
             } catch (Exception e) {
                 sendError(exchange, 500, "Failed to set comment: " + e.getMessage());
             }
+        }
+    }
+
+    // Type handlers
+
+    private class ListTypesHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+
+            String category = params.get("category");
+            int limit = 1000;
+            if (params.containsKey("limit")) {
+                try {
+                    limit = Integer.parseInt(params.get("limit"));
+                } catch (NumberFormatException ignored) {}
+            }
+
+            StringBuilder sb = new StringBuilder();
+            DataTypeManager dtm = program.getDataTypeManager();
+            int count = 0;
+
+            Iterator<DataType> iter = dtm.getAllDataTypes();
+            while (iter.hasNext() && count < limit) {
+                DataType dt = iter.next();
+                if (category != null && !dt.getCategoryPath().getPath().contains(category)) {
+                    continue;
+                }
+                sb.append(formatDataType(dt)).append("\n");
+                count++;
+            }
+
+            if (count == 0) {
+                sb.append("No types found");
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class GetTypeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            String name = params.get("name");
+            if (name == null) {
+                sendError(exchange, 400, "Missing 'name' parameter");
+                return;
+            }
+
+            DataTypeManager dtm = program.getDataTypeManager();
+            DataType dt = findDataType(dtm, name);
+
+            if (dt == null) {
+                sendError(exchange, 404, "Type not found: " + name);
+                return;
+            }
+
+            sendResponse(exchange, 200, formatDataTypeDetailed(dt));
+        }
+    }
+
+    private class SearchTypesHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            String query = params.get("query");
+            if (query == null || query.isEmpty()) {
+                sendError(exchange, 400, "Missing 'query' parameter");
+                return;
+            }
+
+            int limit = 100;
+            if (params.containsKey("limit")) {
+                try {
+                    limit = Integer.parseInt(params.get("limit"));
+                } catch (NumberFormatException ignored) {}
+            }
+
+            StringBuilder sb = new StringBuilder();
+            DataTypeManager dtm = program.getDataTypeManager();
+            String queryLower = query.toLowerCase();
+            int count = 0;
+
+            Iterator<DataType> iter = dtm.getAllDataTypes();
+            while (iter.hasNext() && count < limit) {
+                DataType dt = iter.next();
+                if (dt.getName().toLowerCase().contains(queryLower)) {
+                    sb.append(formatDataType(dt)).append("\n");
+                    count++;
+                }
+            }
+
+            if (count == 0) {
+                sb.append("No types found matching: " + query);
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class CreateTypeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String name = params.get("name");
+            String kind = params.get("kind"); // struct, union, typedef, enum
+            String definition = params.get("definition");
+
+            if (name == null || kind == null) {
+                sendError(exchange, 400, "Missing required parameters: name, kind");
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Create type");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType newType = null;
+
+                    switch (kind.toLowerCase()) {
+                        case "struct":
+                            StructureDataType struct = new StructureDataType(name, 0);
+                            if (definition != null && !definition.isEmpty()) {
+                                parseStructDefinition(struct, definition, dtm);
+                            }
+                            newType = dtm.addDataType(struct, DataTypeConflictHandler.REPLACE_HANDLER);
+                            break;
+                        case "union":
+                            UnionDataType union = new UnionDataType(name);
+                            if (definition != null && !definition.isEmpty()) {
+                                parseUnionDefinition(union, definition, dtm);
+                            }
+                            newType = dtm.addDataType(union, DataTypeConflictHandler.REPLACE_HANDLER);
+                            break;
+                        case "typedef":
+                        case "alias":
+                            if (definition == null || definition.isEmpty()) {
+                                program.endTransaction(txId, false);
+                                sendError(exchange, 400, "Typedef requires 'definition' parameter with base type");
+                                return;
+                            }
+                            DataType baseType = findDataType(dtm, definition);
+                            if (baseType == null) {
+                                program.endTransaction(txId, false);
+                                sendError(exchange, 400, "Base type not found: " + definition);
+                                return;
+                            }
+                            TypedefDataType typedef = new TypedefDataType(name, baseType);
+                            newType = dtm.addDataType(typedef, DataTypeConflictHandler.REPLACE_HANDLER);
+                            break;
+                        case "enum":
+                            EnumDataType enumType = new EnumDataType(name, 4);
+                            if (definition != null && !definition.isEmpty()) {
+                                parseEnumDefinition(enumType, definition);
+                            }
+                            newType = dtm.addDataType(enumType, DataTypeConflictHandler.REPLACE_HANDLER);
+                            break;
+                        default:
+                            program.endTransaction(txId, false);
+                            sendError(exchange, 400, "Unknown type kind: " + kind);
+                            return;
+                    }
+
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, "Created type: " + newType.getPathName());
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to create type: " + e.getMessage());
+            }
+        }
+    }
+
+    private class UpdateTypeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String name = params.get("name");
+            String definition = params.get("definition");
+            String newName = params.get("new_name");
+
+            if (name == null) {
+                sendError(exchange, 400, "Missing required parameter: name");
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Update type");
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+                    DataType dt = findDataType(dtm, name);
+
+                    if (dt == null) {
+                        program.endTransaction(txId, false);
+                        sendError(exchange, 404, "Type not found: " + name);
+                        return;
+                    }
+
+                    // Handle rename
+                    if (newName != null && !newName.isEmpty()) {
+                        try {
+                            dt.setName(newName);
+                        } catch (Exception e) {
+                            program.endTransaction(txId, false);
+                            sendError(exchange, 400, "Failed to rename type: " + e.getMessage());
+                            return;
+                        }
+                    }
+
+                    // Handle definition update for composite types
+                    if (definition != null && !definition.isEmpty()) {
+                        if (dt instanceof Structure) {
+                            Structure struct = (Structure) dt;
+                            struct.deleteAll();
+                            parseStructDefinition(struct, definition, dtm);
+                        } else if (dt instanceof Union) {
+                            Union union = (Union) dt;
+                            // Clear all components
+                            while (union.getNumComponents() > 0) {
+                                union.delete(0);
+                            }
+                            parseUnionDefinition(union, definition, dtm);
+                        } else if (dt instanceof ghidra.program.model.data.Enum) {
+                            ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+                            // Clear and repopulate
+                            for (String valueName : enumType.getNames()) {
+                                enumType.remove(valueName);
+                            }
+                            parseEnumDefinition(enumType, definition);
+                        }
+                    }
+
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, "Updated type: " + dt.getPathName());
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to update type: " + e.getMessage());
+            }
+        }
+    }
+
+    // Equate handlers
+
+    private class ListEquatesHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+
+            int limit = 1000;
+            if (params.containsKey("limit")) {
+                try {
+                    limit = Integer.parseInt(params.get("limit"));
+                } catch (NumberFormatException ignored) {}
+            }
+
+            StringBuilder sb = new StringBuilder();
+            EquateTable equateTable = program.getEquateTable();
+            Iterator<Equate> iter = equateTable.getEquates();
+            int count = 0;
+
+            while (iter.hasNext() && count < limit) {
+                Equate eq = iter.next();
+                sb.append(formatEquate(eq)).append("\n");
+                count++;
+            }
+
+            if (count == 0) {
+                sb.append("No equates found");
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class GetEquateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            String name = params.get("name");
+            String valueStr = params.get("value");
+
+            EquateTable equateTable = program.getEquateTable();
+            Equate eq = null;
+
+            if (name != null) {
+                eq = equateTable.getEquate(name);
+            } else if (valueStr != null) {
+                try {
+                    long value = parseNumber(valueStr);
+                    List<Equate> equates = equateTable.getEquates(value);
+                    if (!equates.isEmpty()) {
+                        eq = equates.get(0);
+                    }
+                } catch (NumberFormatException e) {
+                    sendError(exchange, 400, "Invalid value: " + valueStr);
+                    return;
+                }
+            } else {
+                sendError(exchange, 400, "Missing 'name' or 'value' parameter");
+                return;
+            }
+
+            if (eq == null) {
+                sendError(exchange, 404, "Equate not found");
+                return;
+            }
+
+            sendResponse(exchange, 200, formatEquateDetailed(eq));
+        }
+    }
+
+    private class SetEquateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String name = params.get("name");
+            String valueStr = params.get("value");
+            String addressStr = params.get("address");
+            String operandStr = params.get("operand");
+
+            if (name == null || valueStr == null) {
+                sendError(exchange, 400, "Missing required parameters: name, value");
+                return;
+            }
+
+            long value;
+            try {
+                value = parseNumber(valueStr);
+            } catch (NumberFormatException e) {
+                sendError(exchange, 400, "Invalid value: " + valueStr);
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Set equate");
+                try {
+                    EquateTable equateTable = program.getEquateTable();
+                    Equate eq = equateTable.getEquate(name);
+
+                    if (eq == null) {
+                        eq = equateTable.createEquate(name, value);
+                    }
+
+                    // If address is provided, apply equate at that location
+                    if (addressStr != null) {
+                        Address addr = parseAddress(addressStr);
+                        if (addr == null) {
+                            program.endTransaction(txId, false);
+                            sendError(exchange, 400, "Invalid address: " + addressStr);
+                            return;
+                        }
+                        int operand = 0;
+                        if (operandStr != null) {
+                            try {
+                                operand = Integer.parseInt(operandStr);
+                            } catch (NumberFormatException ignored) {}
+                        }
+                        eq.addReference(addr, operand);
+                    }
+
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, "Equate set: " + name + " = " + value);
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to set equate: " + e.getMessage());
+            }
+        }
+    }
+
+    private class DeleteEquateHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String name = params.get("name");
+            String addressStr = params.get("address");
+            String operandStr = params.get("operand");
+
+            if (name == null) {
+                sendError(exchange, 400, "Missing required parameter: name");
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Delete equate");
+                try {
+                    EquateTable equateTable = program.getEquateTable();
+                    Equate eq = equateTable.getEquate(name);
+
+                    if (eq == null) {
+                        program.endTransaction(txId, false);
+                        sendError(exchange, 404, "Equate not found: " + name);
+                        return;
+                    }
+
+                    if (addressStr != null) {
+                        // Remove reference at specific address
+                        Address addr = parseAddress(addressStr);
+                        if (addr == null) {
+                            program.endTransaction(txId, false);
+                            sendError(exchange, 400, "Invalid address: " + addressStr);
+                            return;
+                        }
+                        int operand = 0;
+                        if (operandStr != null) {
+                            try {
+                                operand = Integer.parseInt(operandStr);
+                            } catch (NumberFormatException ignored) {}
+                        }
+                        eq.removeReference(addr, operand);
+                        program.endTransaction(txId, true);
+                        sendResponse(exchange, 200, "Equate reference removed at: " + addressStr);
+                    } else {
+                        // Delete the entire equate
+                        equateTable.removeEquate(name);
+                        program.endTransaction(txId, true);
+                        sendResponse(exchange, 200, "Equate deleted: " + name);
+                    }
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to delete equate: " + e.getMessage());
+            }
+        }
+    }
+
+    // Helper methods for types and equates
+
+    private DataType findDataType(DataTypeManager dtm, String name) {
+        // Try direct lookup first
+        DataType dt = dtm.getDataType("/" + name);
+        if (dt != null) return dt;
+
+        // Try with full path if it looks like one
+        if (name.startsWith("/")) {
+            dt = dtm.getDataType(name);
+            if (dt != null) return dt;
+        }
+
+        // Search through all types
+        Iterator<DataType> iter = dtm.getAllDataTypes();
+        while (iter.hasNext()) {
+            DataType candidate = iter.next();
+            if (candidate.getName().equals(name)) {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private String formatDataType(DataType dt) {
+        String kind = getDataTypeKind(dt);
+        return String.format("%s\t%s\t%s\t%d", dt.getPathName(), dt.getName(), kind, dt.getLength());
+    }
+
+    private String formatDataTypeDetailed(DataType dt) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Name: ").append(dt.getName()).append("\n");
+        sb.append("Path: ").append(dt.getPathName()).append("\n");
+        sb.append("Kind: ").append(getDataTypeKind(dt)).append("\n");
+        sb.append("Size: ").append(dt.getLength()).append(" bytes\n");
+        sb.append("Description: ").append(dt.getDescription() != null ? dt.getDescription() : "").append("\n");
+
+        if (dt instanceof TypeDef) {
+            TypeDef td = (TypeDef) dt;
+            sb.append("Base Type: ").append(td.getBaseDataType().getPathName()).append("\n");
+        } else if (dt instanceof Structure) {
+            Structure struct = (Structure) dt;
+            sb.append("\nFields:\n");
+            for (DataTypeComponent comp : struct.getComponents()) {
+                sb.append(String.format("  %d: %s %s (%d bytes)\n",
+                    comp.getOffset(),
+                    comp.getDataType().getName(),
+                    comp.getFieldName() != null ? comp.getFieldName() : "",
+                    comp.getLength()));
+            }
+        } else if (dt instanceof Union) {
+            Union union = (Union) dt;
+            sb.append("\nFields:\n");
+            for (DataTypeComponent comp : union.getComponents()) {
+                sb.append(String.format("  %s %s (%d bytes)\n",
+                    comp.getDataType().getName(),
+                    comp.getFieldName() != null ? comp.getFieldName() : "",
+                    comp.getLength()));
+            }
+        } else if (dt instanceof ghidra.program.model.data.Enum) {
+            ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+            sb.append("\nValues:\n");
+            for (String valueName : enumType.getNames()) {
+                sb.append(String.format("  %s = 0x%x\n", valueName, enumType.getValue(valueName)));
+            }
+        }
+
+        return sb.toString();
+    }
+
+    private String getDataTypeKind(DataType dt) {
+        if (dt instanceof TypeDef) return "typedef";
+        if (dt instanceof Structure) return "struct";
+        if (dt instanceof Union) return "union";
+        if (dt instanceof ghidra.program.model.data.Enum) return "enum";
+        if (dt instanceof Pointer) return "pointer";
+        if (dt instanceof Array) return "array";
+        if (dt instanceof FunctionDefinition) return "function";
+        return "primitive";
+    }
+
+    private void parseStructDefinition(Structure struct, String definition, DataTypeManager dtm) {
+        // Parse format: "type1 name1; type2 name2; ..."
+        String[] fields = definition.split(";");
+        for (String field : fields) {
+            field = field.trim();
+            if (field.isEmpty()) continue;
+
+            int lastSpace = field.lastIndexOf(' ');
+            if (lastSpace < 0) continue;
+
+            String typeName = field.substring(0, lastSpace).trim();
+            String fieldName = field.substring(lastSpace + 1).trim();
+
+            DataType fieldType = findDataType(dtm, typeName);
+            if (fieldType != null) {
+                struct.add(fieldType, fieldName, null);
+            }
+        }
+    }
+
+    private void parseUnionDefinition(Union union, String definition, DataTypeManager dtm) {
+        // Parse format: "type1 name1; type2 name2; ..."
+        String[] fields = definition.split(";");
+        for (String field : fields) {
+            field = field.trim();
+            if (field.isEmpty()) continue;
+
+            int lastSpace = field.lastIndexOf(' ');
+            if (lastSpace < 0) continue;
+
+            String typeName = field.substring(0, lastSpace).trim();
+            String fieldName = field.substring(lastSpace + 1).trim();
+
+            DataType fieldType = findDataType(dtm, typeName);
+            if (fieldType != null) {
+                union.add(fieldType, fieldName, null);
+            }
+        }
+    }
+
+    private void parseEnumDefinition(ghidra.program.model.data.Enum enumType, String definition) {
+        // Parse format: "name1=value1; name2=value2; ..."
+        String[] entries = definition.split(";");
+        for (String entry : entries) {
+            entry = entry.trim();
+            if (entry.isEmpty()) continue;
+
+            String[] parts = entry.split("=");
+            if (parts.length != 2) continue;
+
+            String name = parts[0].trim();
+            try {
+                long value = parseNumber(parts[1].trim());
+                enumType.add(name, value);
+            } catch (NumberFormatException ignored) {}
+        }
+    }
+
+    private String formatEquate(Equate eq) {
+        return String.format("%s\t0x%x\t%d refs", eq.getName(), eq.getValue(), eq.getReferenceCount());
+    }
+
+    private String formatEquateDetailed(Equate eq) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Name: ").append(eq.getName()).append("\n");
+        sb.append("Value: ").append(eq.getValue()).append(" (0x").append(Long.toHexString(eq.getValue())).append(")\n");
+        sb.append("Reference Count: ").append(eq.getReferenceCount()).append("\n");
+
+        sb.append("\nReferences:\n");
+        for (EquateReference ref : eq.getReferences()) {
+            sb.append(String.format("  %s operand %d\n", ref.getAddress(), ref.getOpIndex()));
+        }
+
+        return sb.toString();
+    }
+
+    private long parseNumber(String str) {
+        str = str.trim().toLowerCase();
+        if (str.startsWith("0x")) {
+            return Long.parseUnsignedLong(str.substring(2), 16);
+        } else if (str.startsWith("-")) {
+            return Long.parseLong(str);
+        } else {
+            return Long.parseUnsignedLong(str);
         }
     }
 
