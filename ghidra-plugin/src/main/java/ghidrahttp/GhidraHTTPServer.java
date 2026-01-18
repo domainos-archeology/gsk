@@ -169,6 +169,11 @@ public class GhidraHTTPServer {
         // Memory read endpoint
         server.createContext("/read_memory", new ReadMemoryHandler());
 
+        // Data type assignment endpoints
+        server.createContext("/get_data", new GetDataHandler());
+        server.createContext("/set_data_type", new SetDataTypeHandler());
+        server.createContext("/clear_data", new ClearDataHandler());
+
         // POST endpoints
         server.createContext("/set_function_prototype", new SetFunctionPrototypeHandler());
         server.createContext("/rename_function_by_address", new RenameFunctionHandler());
@@ -1740,6 +1745,259 @@ public class GhidraHTTPServer {
         }
 
         return sb.toString();
+    }
+
+    // Data type assignment handlers
+
+    private class GetDataHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+
+            String addressStr = params.get("address");
+            if (addressStr == null) {
+                sendError(exchange, 400, "Missing 'address' parameter");
+                return;
+            }
+
+            Address address = parseAddress(addressStr);
+            if (address == null) {
+                sendError(exchange, 400, "Invalid address: " + addressStr);
+                return;
+            }
+
+            Listing listing = program.getListing();
+            Data data = listing.getDataAt(address);
+
+            if (data == null) {
+                // Check if it's within a data item
+                data = listing.getDataContaining(address);
+                if (data == null) {
+                    sendResponse(exchange, 200, "No data defined at: " + addressStr);
+                    return;
+                }
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Address: ").append(data.getAddress()).append("\n");
+            sb.append("Type: ").append(data.getDataType().getPathName()).append("\n");
+            sb.append("Size: ").append(data.getLength()).append(" bytes\n");
+            sb.append("Value: ").append(data.getDefaultValueRepresentation()).append("\n");
+
+            if (data.hasStringValue()) {
+                sb.append("String: ").append(data.getDefaultValueRepresentation()).append("\n");
+            }
+
+            // Show labels at this address
+            Symbol[] symbols = program.getSymbolTable().getSymbols(data.getAddress());
+            if (symbols.length > 0) {
+                sb.append("Labels: ");
+                for (int i = 0; i < symbols.length; i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append(symbols[i].getName());
+                }
+                sb.append("\n");
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class SetDataTypeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String addressStr = params.get("address");
+            String typeName = params.get("type");
+
+            if (addressStr == null || typeName == null) {
+                sendError(exchange, 400, "Missing required parameters: address, type");
+                return;
+            }
+
+            Address address = parseAddress(addressStr);
+            if (address == null) {
+                sendError(exchange, 400, "Invalid address: " + addressStr);
+                return;
+            }
+
+            // Find the data type
+            DataTypeManager dtm = program.getDataTypeManager();
+            DataType dataType = findDataTypeForData(dtm, typeName);
+
+            if (dataType == null) {
+                sendError(exchange, 404, "Data type not found: " + typeName);
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Set data type");
+                try {
+                    Listing listing = program.getListing();
+
+                    // Clear any existing data at this location
+                    listing.clearCodeUnits(address, address.add(dataType.getLength() - 1), false);
+
+                    // Create the data
+                    Data newData = listing.createData(address, dataType);
+
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, String.format("Data type set: %s at %s (%d bytes)",
+                        dataType.getName(), addressStr, newData.getLength()));
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to set data type: " + e.getMessage());
+            }
+        }
+    }
+
+    private class ClearDataHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String addressStr = params.get("address");
+            String lengthStr = params.get("length");
+
+            if (addressStr == null) {
+                sendError(exchange, 400, "Missing required parameter: address");
+                return;
+            }
+
+            Address address = parseAddress(addressStr);
+            if (address == null) {
+                sendError(exchange, 400, "Invalid address: " + addressStr);
+                return;
+            }
+
+            int length = 1;
+            if (lengthStr != null) {
+                try {
+                    length = Integer.parseInt(lengthStr);
+                } catch (NumberFormatException e) {
+                    sendError(exchange, 400, "Invalid length: " + lengthStr);
+                    return;
+                }
+            }
+
+            try {
+                int txId = program.startTransaction("Clear data");
+                try {
+                    Listing listing = program.getListing();
+                    Address endAddr = address.add(length - 1);
+                    listing.clearCodeUnits(address, endAddr, false);
+
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, String.format("Cleared data from %s to %s",
+                        addressStr, endAddr.toString()));
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to clear data: " + e.getMessage());
+            }
+        }
+    }
+
+    // Helper method to find data types including common built-ins
+    private DataType findDataTypeForData(DataTypeManager dtm, String name) {
+        // First try the program's data type manager
+        DataType dt = findDataType(dtm, name);
+        if (dt != null) return dt;
+
+        // Try common built-in types by name
+        String lowerName = name.toLowerCase();
+        switch (lowerName) {
+            case "byte":
+            case "db":
+                return new ByteDataType();
+            case "word":
+            case "ushort":
+            case "uint16":
+            case "dw":
+                return new WordDataType();
+            case "dword":
+            case "uint":
+            case "uint32":
+            case "dd":
+                return new DWordDataType();
+            case "qword":
+            case "ulong":
+            case "uint64":
+            case "dq":
+                return new QWordDataType();
+            case "short":
+            case "int16":
+                return new ShortDataType();
+            case "int":
+            case "int32":
+                return new IntegerDataType();
+            case "long":
+            case "int64":
+                return new LongDataType();
+            case "float":
+                return new FloatDataType();
+            case "double":
+                return new DoubleDataType();
+            case "char":
+                return new CharDataType();
+            case "string":
+            case "cstring":
+                return new StringDataType();
+            case "pointer":
+            case "ptr":
+                return new PointerDataType();
+            case "void":
+                return new VoidDataType();
+            case "bool":
+            case "boolean":
+                return new BooleanDataType();
+            case "undefined":
+            case "undefined1":
+                return new Undefined1DataType();
+            case "undefined2":
+                return new Undefined2DataType();
+            case "undefined4":
+                return new Undefined4DataType();
+            case "undefined8":
+                return new Undefined8DataType();
+        }
+
+        // Check for pointer syntax like "type *" or "type*"
+        if (name.endsWith("*")) {
+            String baseTypeName = name.substring(0, name.length() - 1).trim();
+            DataType baseType = findDataTypeForData(dtm, baseTypeName);
+            if (baseType != null) {
+                return new PointerDataType(baseType);
+            }
+        }
+
+        return null;
     }
 
     // Helper methods for types and equates

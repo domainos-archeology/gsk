@@ -268,6 +268,31 @@ func (c *GhidraClient) ReadMemory(address string, length int) ([]byte, error) {
 	return c.get(fmt.Sprintf("/read_memory?address=%s&length=%d", address, length))
 }
 
+// Data type assignment methods
+
+// GetData returns information about data at the given address.
+func (c *GhidraClient) GetData(address string) ([]byte, error) {
+	return c.get(fmt.Sprintf("/get_data?address=%s", address))
+}
+
+// SetDataType assigns a data type to the given address.
+func (c *GhidraClient) SetDataType(address, typeName string) ([]byte, error) {
+	data := url.Values{}
+	data.Set("address", address)
+	data.Set("type", typeName)
+	return c.post("/set_data_type", data)
+}
+
+// ClearData clears defined data at the given address.
+func (c *GhidraClient) ClearData(address string, length int) ([]byte, error) {
+	data := url.Values{}
+	data.Set("address", address)
+	if length > 0 {
+		data.Set("length", fmt.Sprintf("%d", length))
+	}
+	return c.post("/clear_data", data)
+}
+
 // newClient creates a GhidraClient using the configured server address.
 func newClient() *GhidraClient {
 	return NewGhidraClient(getGhidraServer())

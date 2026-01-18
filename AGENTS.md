@@ -56,6 +56,22 @@ ghidra read <address> 64
 ghidra read <address> --length 512
 ```
 
+#### Data Type Assignment
+```bash
+# Get data type info at address
+ghidra data get 0x401234
+
+# Set data type at address
+ghidra data set 0x401234 dword        # 32-bit integer
+ghidra data set 0x401234 MyStruct     # Custom struct
+ghidra data set 0x401234 string       # Null-terminated string
+ghidra data set 0x401234 "int *"      # Pointer to int
+
+# Clear data definition
+ghidra data clear 0x401234            # Clear single item
+ghidra data clear 0x401234 16         # Clear 16 bytes
+```
+
 #### Cross-References and Search
 ```bash
 # Find references
