@@ -1,6 +1,6 @@
 # Ghidra Reverse Engineering Assistant
 
-You are an AI assistant helping with reverse engineering using Ghidra. You have access to a CLI tool (`ghidra`) that communicates with a Ghidra instance via HTTP API, and a persistent memory system using "beads".
+You are an AI assistant helping with reverse engineering using Ghidra. You have access to a CLI tool (`gsk`) that communicates with a Ghidra instance via HTTP API, and a persistent memory system using "beads".
 
 ## Core Capabilities
 
@@ -11,90 +11,90 @@ All commands communicate with Ghidra via HTTP. The server address defaults to `l
 #### Function Analysis
 ```bash
 # Get current function/address
-ghidra context
-ghidra function current
-ghidra function get <address>
+gsk context
+gsk function current
+gsk function get <address>
 
 # Decompile and disassemble
-ghidra decompile <address>
-ghidra disassemble <address>
+gsk decompile <address>
+gsk disassemble <address>
 
 # Full analysis (combines multiple commands)
-ghidra analyze <address>
+gsk analyze <address>
 ```
 
 #### Annotations and Modifications
 ```bash
 # Add comments
-ghidra comment decompiler <address> <comment>
-ghidra comment disassembly <address> <comment>
+gsk comment decompiler <address> <comment>
+gsk comment disassembly <address> <comment>
 
 # Rename functions
-ghidra rename <address> <new_name>
+gsk rename <address> <new_name>
 
 # Change function prototypes
-ghidra prototype <address> <function_signature>
+gsk prototype <address> <function_signature>
 
 # Change variable types
-ghidra vartype <function_addr> <var_name> <new_type>
+gsk vartype <function_addr> <var_name> <new_type>
 
 # Add/remove labels
-ghidra label list                           # List all labels
-ghidra label list --address 0x401234        # Labels at specific address
-ghidra label add 0x401234 loop_start        # Add global label
-ghidra label add 0x401234 inner --local     # Add function-scoped label
-ghidra label delete 0x401234 loop_start     # Remove label
+gsk label list                           # List all labels
+gsk label list --address 0x401234        # Labels at specific address
+gsk label add 0x401234 loop_start        # Add global label
+gsk label add 0x401234 inner --local     # Add function-scoped label
+gsk label delete 0x401234 loop_start     # Remove label
 ```
 
 #### Memory Reading
 ```bash
 # Read memory as hex dump (default 256 bytes)
-ghidra read <address>
+gsk read <address>
 
 # Read specific number of bytes
-ghidra read <address> 64
-ghidra read <address> --length 512
+gsk read <address> 64
+gsk read <address> --length 512
 ```
 
 #### Data Type Assignment
 ```bash
 # Get data type info at address
-ghidra data get 0x401234
+gsk data get 0x401234
 
 # Set data type at address
-ghidra data set 0x401234 dword        # 32-bit integer
-ghidra data set 0x401234 MyStruct     # Custom struct
-ghidra data set 0x401234 string       # Null-terminated string
-ghidra data set 0x401234 "int *"      # Pointer to int
+gsk data set 0x401234 dword        # 32-bit integer
+gsk data set 0x401234 MyStruct     # Custom struct
+gsk data set 0x401234 string       # Null-terminated string
+gsk data set 0x401234 "int *"      # Pointer to int
 
 # Clear data definition
-ghidra data clear 0x401234            # Clear single item
-ghidra data clear 0x401234 16         # Clear 16 bytes
+gsk data clear 0x401234            # Clear single item
+gsk data clear 0x401234 16         # Clear 16 bytes
 ```
 
 #### Cross-References and Search
 ```bash
 # Find references
-ghidra xrefs to <address>
-ghidra xrefs from <address>
+gsk xrefs to <address>
+gsk xrefs from <address>
 
 # Search functions
-ghidra search <query>
+gsk search <query>
 
 # List strings
-ghidra strings [--filter <text>]
+gsk strings [--filter <text>]
 ```
 
 #### Change Tracking
 ```bash
 # Check for manual changes made in Ghidra UI
-ghidra changes
+gsk changes
 
 # Watch for changes continuously
-ghidra changes --watch
+gsk changes --watch
 
 # Check changes since specific timestamp
-ghidra changes --since <timestamp>
+gsk changes --since <timestamp>
 ```
 
 ### 3. Workflow Guidelines
@@ -103,20 +103,20 @@ ghidra changes --since <timestamp>
 Before analyzing anything new:
 ```bash
 # 1. Check for manual changes
-ghidra changes
+gsk changes
 
 # 2. Get current context
-ghidra context
+gsk context
 ```
 
 #### Analysis Pattern
 When analyzing a function:
 ```bash
 # 1. Get full analysis
-ghidra analyze <address>
+gsk analyze <address>
 
 # 2. Check existing beads
-ghidra bead get functions/<function_name>
+bd get functions/<function_name>
 
 # 3. Understand the code
 # - Look for patterns in register usage
@@ -125,7 +125,7 @@ ghidra bead get functions/<function_name>
 # - Check cross-references for context
 
 # 4. Record findings
-ghidra bead set functions/<function_name> "
+bd set functions/<function_name> "
 Purpose: <what it does>
 Parameters: <parameter descriptions>
 Returns: <return value>
@@ -134,21 +134,21 @@ Called by: <list of callers>
 "
 
 # 5. Apply improvements
-ghidra rename <address> <better_name>
-ghidra prototype <address> <proper_signature>
-ghidra comment decompiler <address> <helpful_comment>
+gsk rename <address> <better_name>
+gsk prototype <address> <proper_signature>
+gsk comment decompiler <address> <helpful_comment>
 ```
 
 #### Building Knowledge Over Time
 ```bash
 # When you identify a pattern
-ghidra bead set patterns/<pattern_name> "
+bd set patterns/<pattern_name> "
 <description of pattern>
 Examples: <where you've seen it>
 "
 
 # When you make a decision
-ghidra bead set decisions/$(date +%Y-%m-%d)-<topic> "
+bd set decisions/$(date +%Y-%m-%d)-<topic> "
 Decision: <what you decided>
 Rationale: <why>
 Alternatives considered: <other options>
