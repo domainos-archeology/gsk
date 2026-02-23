@@ -329,6 +329,54 @@ func (c *GhidraClient) ListExports(filter string, limit int) ([]byte, error) {
 	return c.get(endpoint)
 }
 
+// Program info and memory map methods
+
+// GetProgramInfo returns program metadata.
+func (c *GhidraClient) GetProgramInfo() ([]byte, error) {
+	return c.get("/program_info")
+}
+
+// ListMemoryBlocks returns memory block information.
+func (c *GhidraClient) ListMemoryBlocks(limit int) ([]byte, error) {
+	return c.get(fmt.Sprintf("/list_memory_blocks?limit=%d", limit))
+}
+
+// Bookmark-related methods
+
+// ListBookmarks returns bookmarks, optionally filtered by type.
+func (c *GhidraClient) ListBookmarks(bookmarkType string, limit int) ([]byte, error) {
+	endpoint := fmt.Sprintf("/list_bookmarks?limit=%d", limit)
+	if bookmarkType != "" {
+		endpoint += fmt.Sprintf("&type=%s", url.QueryEscape(bookmarkType))
+	}
+	return c.get(endpoint)
+}
+
+// SetBookmark creates or updates a bookmark at the given address.
+func (c *GhidraClient) SetBookmark(address, bookmarkType, category, comment string) ([]byte, error) {
+	data := url.Values{}
+	data.Set("address", address)
+	data.Set("type", bookmarkType)
+	if category != "" {
+		data.Set("category", category)
+	}
+	if comment != "" {
+		data.Set("comment", comment)
+	}
+	return c.post("/set_bookmark", data)
+}
+
+// DeleteBookmark removes a bookmark at the given address.
+func (c *GhidraClient) DeleteBookmark(address, bookmarkType, category string) ([]byte, error) {
+	data := url.Values{}
+	data.Set("address", address)
+	data.Set("type", bookmarkType)
+	if category != "" {
+		data.Set("category", category)
+	}
+	return c.post("/delete_bookmark", data)
+}
+
 // newClient creates a GhidraClient using the configured server address.
 func newClient() *GhidraClient {
 	return NewGhidraClient(getGhidraServer())

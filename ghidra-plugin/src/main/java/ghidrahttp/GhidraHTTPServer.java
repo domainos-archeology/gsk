@@ -17,6 +17,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.data.*;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.*;
@@ -182,6 +183,15 @@ public class GhidraHTTPServer {
         server.createContext("/get_data", new GetDataHandler());
         server.createContext("/set_data_type", new SetDataTypeHandler());
         server.createContext("/clear_data", new ClearDataHandler());
+
+        // Program info and memory map endpoints
+        server.createContext("/program_info", new ProgramInfoHandler());
+        server.createContext("/list_memory_blocks", new ListMemoryBlocksHandler());
+
+        // Bookmark endpoints
+        server.createContext("/list_bookmarks", new ListBookmarksHandler());
+        server.createContext("/set_bookmark", new SetBookmarkHandler());
+        server.createContext("/delete_bookmark", new DeleteBookmarkHandler());
 
         // POST endpoints
         server.createContext("/set_function_prototype", new SetFunctionPrototypeHandler());
@@ -2114,6 +2124,236 @@ public class GhidraHTTPServer {
                 }
             } catch (Exception e) {
                 sendError(exchange, 500, "Failed to clear data: " + e.getMessage());
+            }
+        }
+    }
+
+    private class ProgramInfoHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Name: ").append(program.getName()).append("\n");
+            sb.append("Executable Format: ").append(program.getExecutableFormat()).append("\n");
+            sb.append("Language ID: ").append(program.getLanguageID()).append("\n");
+            sb.append("Compiler Spec: ").append(program.getCompilerSpec().getCompilerSpecID()).append("\n");
+            sb.append("Image Base: ").append(program.getImageBase()).append("\n");
+            sb.append("Executable Path: ").append(program.getExecutablePath()).append("\n");
+            sb.append("MD5: ").append(program.getExecutableMD5()).append("\n");
+            sb.append("Min Address: ").append(program.getMinAddress()).append("\n");
+            sb.append("Max Address: ").append(program.getMaxAddress()).append("\n");
+            sb.append("Function Count: ").append(program.getFunctionManager().getFunctionCount()).append("\n");
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class ListMemoryBlocksHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            int limit = 1000;
+            String limitStr = params.get("limit");
+            if (limitStr != null) {
+                try {
+                    limit = Integer.parseInt(limitStr);
+                } catch (NumberFormatException e) {
+                    sendError(exchange, 400, "Invalid limit: " + limitStr);
+                    return;
+                }
+            }
+
+            MemoryBlock[] blocks = program.getMemory().getBlocks();
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+            for (MemoryBlock block : blocks) {
+                if (count >= limit) break;
+
+                String perms = ""
+                    + (block.isRead() ? "r" : "-")
+                    + (block.isWrite() ? "w" : "-")
+                    + (block.isExecute() ? "x" : "-");
+
+                sb.append(String.format("%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+                    block.getName(),
+                    block.getStart(),
+                    block.getEnd(),
+                    block.getSize(),
+                    perms,
+                    block.getType().name(),
+                    block.isInitialized()));
+
+                count++;
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class ListBookmarksHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            int limit = 1000;
+            String limitStr = params.get("limit");
+            if (limitStr != null) {
+                try {
+                    limit = Integer.parseInt(limitStr);
+                } catch (NumberFormatException e) {
+                    sendError(exchange, 400, "Invalid limit: " + limitStr);
+                    return;
+                }
+            }
+            String filterType = params.get("type");
+
+            BookmarkManager bmMgr = program.getBookmarkManager();
+            Iterator<Bookmark> iter;
+            if (filterType != null && !filterType.isEmpty()) {
+                iter = bmMgr.getBookmarksIterator(filterType);
+            } else {
+                iter = bmMgr.getBookmarksIterator();
+            }
+
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+            while (iter.hasNext() && count < limit) {
+                Bookmark bm = iter.next();
+                sb.append(String.format("%s\t%s\t%s\t%s\n",
+                    bm.getAddress(),
+                    bm.getTypeString(),
+                    bm.getCategory(),
+                    bm.getComment()));
+                count++;
+            }
+
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class SetBookmarkHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String addressStr = params.get("address");
+            String type = params.get("type");
+            String category = params.get("category");
+            String comment = params.get("comment");
+
+            if (addressStr == null) {
+                sendError(exchange, 400, "Missing required parameter: address");
+                return;
+            }
+            if (type == null || type.isEmpty()) {
+                type = "Note";
+            }
+            if (category == null) {
+                category = "";
+            }
+            if (comment == null) {
+                comment = "";
+            }
+
+            Address address = parseAddress(addressStr);
+            if (address == null) {
+                sendError(exchange, 400, "Invalid address: " + addressStr);
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Set bookmark");
+                try {
+                    program.getBookmarkManager().setBookmark(address, type, category, comment);
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, String.format("Bookmark set at %s (type=%s, category=%s)",
+                        addressStr, type, category));
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to set bookmark: " + e.getMessage());
+            }
+        }
+    }
+
+    private class DeleteBookmarkHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendError(exchange, 405, "Method not allowed");
+                return;
+            }
+            if (program == null) {
+                sendError(exchange, 503, "No program loaded");
+                return;
+            }
+
+            Map<String, String> params = parseFormData(exchange);
+            String addressStr = params.get("address");
+            String type = params.get("type");
+            String category = params.get("category");
+
+            if (addressStr == null) {
+                sendError(exchange, 400, "Missing required parameter: address");
+                return;
+            }
+            if (type == null || type.isEmpty()) {
+                type = "Note";
+            }
+            if (category == null) {
+                category = "";
+            }
+
+            Address address = parseAddress(addressStr);
+            if (address == null) {
+                sendError(exchange, 400, "Invalid address: " + addressStr);
+                return;
+            }
+
+            try {
+                int txId = program.startTransaction("Delete bookmark");
+                try {
+                    BookmarkManager bmMgr = program.getBookmarkManager();
+                    Bookmark bm = bmMgr.getBookmark(address, type, category);
+                    if (bm == null) {
+                        program.endTransaction(txId, false);
+                        sendError(exchange, 404, String.format("No bookmark found at %s (type=%s, category=%s)",
+                            addressStr, type, category));
+                        return;
+                    }
+                    bmMgr.removeBookmark(bm);
+                    program.endTransaction(txId, true);
+                    sendResponse(exchange, 200, String.format("Bookmark deleted at %s (type=%s, category=%s)",
+                        addressStr, type, category));
+                } catch (Exception e) {
+                    program.endTransaction(txId, false);
+                    throw e;
+                }
+            } catch (Exception e) {
+                sendError(exchange, 500, "Failed to delete bookmark: " + e.getMessage());
             }
         }
     }
