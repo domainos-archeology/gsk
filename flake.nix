@@ -1,5 +1,5 @@
 {
-  description = "ghidra-gsk (gsk) - a command line for interfacing with ghidra";
+  description = "gsk - a command line for interfacing with ghidra";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
