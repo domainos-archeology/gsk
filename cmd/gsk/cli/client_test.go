@@ -868,3 +868,88 @@ func readBody(r *http.Request) string {
 	r.Body.Read(body)
 	return string(body)
 }
+
+func TestWithProgramParam(t *testing.T) {
+	tests := []struct {
+		endpoint, program, want string
+	}{
+		{"/list_functions", "", "/list_functions"},
+		{"/list_functions", "/bin/ls", "/list_functions?program=%2Fbin%2Fls"},
+		{"/xrefs_to?address=0x10&limit=5", "/bin/ls", "/xrefs_to?address=0x10&limit=5&program=%2Fbin%2Fls"},
+	}
+	for _, tt := range tests {
+		if got := withProgramParam(tt.endpoint, tt.program); got != tt.want {
+			t.Errorf("withProgramParam(%q, %q) = %q, want %q", tt.endpoint, tt.program, got, tt.want)
+		}
+	}
+}
+
+func TestProgramTargeting(t *testing.T) {
+	var gotQuery, gotBody string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		if r.Method == http.MethodPost {
+			r.ParseForm()
+			gotBody = r.PostForm.Encode()
+		}
+		w.Write([]byte("ok"))
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts).WithProgram("/a/b")
+	if _, err := client.ListFunctions(); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != "program=%2Fa%2Fb" {
+		t.Errorf("GET query = %q, want program=%%2Fa%%2Fb", gotQuery)
+	}
+	if _, err := client.RenameFunction("0x10", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != "program=%2Fa%2Fb" {
+		t.Errorf("POST query = %q, want program=%%2Fa%%2Fb", gotQuery)
+	}
+	if !strings.Contains(gotBody, "new_name=main") {
+		t.Errorf("POST body = %q, want new_name=main", gotBody)
+	}
+}
+
+func TestFanOutAllPrograms(t *testing.T) {
+	var seen []string
+	ts := testServerWithHandler(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/list_programs":
+			w.Write([]byte("/a\tA\tactive,tool:CodeBrowser\n/b\tB\tserver\n"))
+		case "/list_functions":
+			p := r.URL.Query().Get("program")
+			seen = append(seen, p)
+			w.Write([]byte("fn-of-" + p))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	defer ts.Close()
+
+	client := clientFromTestServer(ts).WithAllPrograms(true)
+	got, err := client.ListFunctions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "=== /a ===\nfn-of-/a\n=== /b ===\nfn-of-/b\n"
+	if string(got) != want {
+		t.Errorf("fan-out output = %q, want %q", got, want)
+	}
+	if len(seen) != 2 || seen[0] != "/a" || seen[1] != "/b" {
+		t.Errorf("programs queried = %v, want [/a /b]", seen)
+	}
+}
+
+func TestParseProgramPaths(t *testing.T) {
+	got := parseProgramPaths("/x/y\tY\tactive\n\n/z\tZ\tserver\nNo programs open\n")
+	if len(got) != 2 || got[0] != "/x/y" || got[1] != "/z" {
+		t.Errorf("parseProgramPaths = %v", got)
+	}
+	if got := parseProgramPaths("No programs open"); len(got) != 0 {
+		t.Errorf("parseProgramPaths(no programs) = %v, want empty", got)
+	}
+}

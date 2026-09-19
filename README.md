@@ -18,15 +18,22 @@ go install ./cmd/gsk/
 
 # Install the plugin into Ghidra:
 #   File -> Install Extensions -> + -> pick the zip from ghidra-plugin/dist/
-#   Restart Ghidra. The HTTP server starts automatically on port 8080.
+#   Restart Ghidra. In the project window, File -> Configure -> check "GhidraHTTP"
+#   if it isn't already enabled. The HTTP server starts on port 8080.
 
-# Open a binary in Ghidra, then:
+# Open a project in Ghidra, then:
+gsk project list                 # every file in the project
+gsk program open /bin/ls         # open a program (no CodeBrowser window needed)
 gsk info                         # program metadata at a glance
 gsk memorymap                    # memory layout
 gsk function list                # all functions
 gsk analyze 0x401000             # decompile + disassemble + xrefs
 gsk rename 0x401000 main         # rename a function
+gsk -p /bin/cat search read      # target a different program for one command
+gsk --all search read            # run against every open program
 ```
+
+The plugin lives in Ghidra's **project window**, not in a CodeBrowser. There is one server per Ghidra session, and it can operate on any program in the open project, whether or not you have it open in a CodeBrowser window.
 
 ## Building
 
@@ -46,11 +53,35 @@ gsk rename 0x401000 main         # rename a function
 
 ```yaml
 server: localhost:8080
+program: /bin/ls        # optional: default program for every command
 ```
 
 You can also pass `--server <host:port>` on any command, or set the `GHIDRA_SERVER` environment variable.
 
+### Choosing a program
+
+Every command targets one program. Which one is decided in this order:
+
+1. `--program` / `-p` on the command line (a project path like `/bin/ls`, or a bare file name if it's unique in the project).
+2. The `GHIDRA_PROGRAM` environment variable.
+3. `program:` in `.gsk.yaml`.
+4. Otherwise the server's default: the program active in a CodeBrowser window, or the only program the server has opened.
+
+Pass `--all` to run a command against every open program instead. Output is concatenated with a `=== /path ===` header per program.
+
 ## Command reference
+
+### Project and programs
+
+```bash
+gsk project list [folder] [--programs] [--no-recursive]   # files in the project
+gsk program list                      # open programs and where they're open
+gsk program open <path> [--visible]   # open a program (hidden, or shown in a CodeBrowser)
+gsk program save [path]               # write changes back to the project
+gsk program close <path> [--force]    # release the server's hold on a program
+```
+
+Programs opened with `gsk program open` are held open by the server and stay open until closed. Changes made through `gsk` are not saved automatically; use `gsk program save`, or save from Ghidra if the program is also open in a CodeBrowser.
 
 ### Orientation
 
@@ -168,7 +199,7 @@ gsk changes --since 1700000000000     # changes after a timestamp
 
 ## How it works
 
-The Ghidra plugin starts a lightweight HTTP server (default port 8080) inside Ghidra's JVM. The server exposes ~40 endpoints that map to Ghidra's program model: functions, types, symbols, memory, the decompiler, and so on. The `gsk` CLI is a thin Go client that calls those endpoints and prints the results. Responses are plain text (tab-separated where appropriate), so they're easy to pipe, grep, and script against.
+The Ghidra plugin is an application-level plugin: it loads into Ghidra's project window and starts a lightweight HTTP server (default port 8080) inside Ghidra's JVM. Because it isn't tied to a CodeBrowser, there is exactly one server per session and it can see the whole project. Every endpoint takes an optional `program=<project path>` parameter; the server opens programs on demand (hidden, with no window) or shares the instance a CodeBrowser already has open. The server exposes ~45 endpoints that map to Ghidra's program model: functions, types, symbols, memory, the decompiler, and so on. The `gsk` CLI is a thin Go client that calls those endpoints and prints the results. Responses are plain text (tab-separated where appropriate), so they're easy to pipe, grep, and script against.
 
 ## Status
 

@@ -4,31 +4,39 @@ import docking.ActionContext;
 import docking.action.DockingAction;
 import docking.action.MenuData;
 import ghidra.app.plugin.PluginCategoryNames;
-import ghidra.app.plugin.ProgramPlugin;
+import ghidra.framework.main.ApplicationLevelOnlyPlugin;
+import ghidra.framework.main.FrontEndService;
+import ghidra.framework.model.Project;
+import ghidra.framework.model.ProjectListener;
+import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.plugintool.util.PluginStatus;
-import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
 /**
- * GhidraHTTP Plugin - Provides an HTTP API for Ghidra operations
+ * GhidraHTTP Plugin - Provides an HTTP API for Ghidra operations.
  *
- * This plugin starts an HTTP server that exposes Ghidra's analysis capabilities
- * through a REST-like API, enabling external tools to interact with Ghidra.
+ * This plugin lives in the Ghidra project window (the front-end tool), not in a CodeBrowser.
+ * That means exactly one HTTP server per Ghidra session, and the server can address any
+ * program in the open project, whether or not it is open in a CodeBrowser window.
+ *
+ * If the plugin does not show up automatically, enable it in the project window via
+ * File -> Configure -> GhidraHTTP.
  */
 //@formatter:off
 @PluginInfo(
-    status = PluginStatus.STABLE,
+    status = PluginStatus.RELEASED,
     packageName = "GhidraHTTP",
     category = PluginCategoryNames.COMMON,
     shortDescription = "HTTP API for Ghidra",
-    description = "Provides an HTTP API server for remote access to Ghidra analysis features including decompilation, disassembly, cross-references, and more."
+    description = "Provides an HTTP API server for remote access to Ghidra analysis features including decompilation, disassembly, cross-references, and more. Runs in the project window and can operate on every program in the project."
 )
 //@formatter:on
-public class GhidraHTTPPlugin extends ProgramPlugin {
+public class GhidraHTTPPlugin extends Plugin implements ApplicationLevelOnlyPlugin, ProjectListener {
 
     private GhidraHTTPServer httpServer;
+    private ProgramRegistry registry;
     private int serverPort = 8080;
     private DockingAction startServerAction;
     private DockingAction stopServerAction;
@@ -39,11 +47,10 @@ public class GhidraHTTPPlugin extends ProgramPlugin {
     }
 
     private void createActions() {
-        // Start Server action
         startServerAction = new DockingAction("Start HTTP Server", getName()) {
             @Override
             public void actionPerformed(ActionContext context) {
-                startServer();
+                startServer(true);
             }
         };
         startServerAction.setMenuBarData(new MenuData(
@@ -54,11 +61,10 @@ public class GhidraHTTPPlugin extends ProgramPlugin {
         startServerAction.setEnabled(true);
         tool.addAction(startServerAction);
 
-        // Stop Server action
         stopServerAction = new DockingAction("Stop HTTP Server", getName()) {
             @Override
             public void actionPerformed(ActionContext context) {
-                stopServer();
+                stopServer(true);
             }
         };
         stopServerAction.setMenuBarData(new MenuData(
@@ -73,57 +79,82 @@ public class GhidraHTTPPlugin extends ProgramPlugin {
     @Override
     protected void init() {
         super.init();
-        // Auto-start the server when plugin loads
-        startServer();
+        FrontEndService frontEnd = tool.getService(FrontEndService.class);
+        if (frontEnd != null) {
+            frontEnd.addProjectListener(this);
+        }
+        // Auto-start the server when the plugin loads; log rather than pop a dialog.
+        startServer(false);
     }
 
     @Override
     protected void dispose() {
-        stopServer();
+        FrontEndService frontEnd = tool.getService(FrontEndService.class);
+        if (frontEnd != null) {
+            frontEnd.removeProjectListener(this);
+        }
+        stopServer(false);
         super.dispose();
     }
 
+    // ProjectListener: drop any programs we hold when the project goes away.
+
     @Override
-    protected void programActivated(Program program) {
-        super.programActivated(program);
-        if (httpServer != null) {
-            httpServer.setProgram(program);
-        }
+    public void projectOpened(Project project) {
+        // Nothing to do; programs are resolved lazily against the active project.
     }
 
     @Override
-    protected void programDeactivated(Program program) {
-        super.programDeactivated(program);
+    public void projectClosed(Project project) {
+        if (registry != null) {
+            registry.releaseAll();
+        }
         if (httpServer != null) {
-            httpServer.setProgram(null);
+            httpServer.clearTracking();
         }
     }
 
-    private void startServer() {
+    private void startServer(boolean interactive) {
         if (httpServer != null && httpServer.isRunning()) {
-            Msg.showInfo(this, null, "GhidraHTTP", "Server is already running on port " + serverPort);
+            if (interactive) {
+                Msg.showInfo(this, null, "GhidraHTTP", "Server is already running on port " + serverPort);
+            }
             return;
         }
 
         try {
-            httpServer = new GhidraHTTPServer(serverPort, tool, currentProgram);
+            registry = new ProgramRegistry(tool);
+            httpServer = new GhidraHTTPServer(serverPort, tool, registry);
             httpServer.start();
             startServerAction.setEnabled(false);
             stopServerAction.setEnabled(true);
-            Msg.showInfo(this, null, "GhidraHTTP", "HTTP Server started on port " + serverPort);
+            if (interactive) {
+                Msg.showInfo(this, null, "GhidraHTTP", "HTTP Server started on port " + serverPort);
+            }
         } catch (Exception e) {
-            Msg.showError(this, null, "GhidraHTTP Error",
-                "Failed to start HTTP server: " + e.getMessage(), e);
+            httpServer = null;
+            if (interactive) {
+                Msg.showError(this, null, "GhidraHTTP Error",
+                    "Failed to start HTTP server: " + e.getMessage(), e);
+            } else {
+                Msg.error(this, "Failed to start HTTP server on port " + serverPort + ": " + e.getMessage());
+            }
         }
     }
 
-    private void stopServer() {
+    private void stopServer(boolean interactive) {
         if (httpServer != null) {
             httpServer.stop();
             httpServer = null;
+            if (registry != null) {
+                registry.releaseAll();
+                registry = null;
+            }
             startServerAction.setEnabled(true);
             stopServerAction.setEnabled(false);
-            Msg.showInfo(this, null, "GhidraHTTP", "HTTP Server stopped");
+            if (interactive) {
+                Msg.showInfo(this, null, "GhidraHTTP", "HTTP Server stopped");
+            }
         }
     }
 

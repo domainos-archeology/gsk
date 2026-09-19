@@ -8,6 +8,8 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.services.DataTypeManagerService;
 import ghidra.app.services.GoToService;
+import ghidra.app.services.ProgramManager;
+import ghidra.framework.model.DomainFile;
 import ghidra.app.util.cparser.C.CParserUtils;
 import ghidra.framework.model.DomainObjectChangedEvent;
 import ghidra.framework.model.DomainObjectChangeRecord;
@@ -24,6 +26,7 @@ import ghidra.program.model.symbol.*;
 import ghidra.program.util.ProgramLocation;
 import ghidra.framework.model.EventType;
 import ghidra.util.Msg;
+import ghidra.util.Swing;
 import ghidra.util.task.TaskMonitor;
 
 import java.io.*;
@@ -40,19 +43,20 @@ import java.util.concurrent.Executors;
 public class GhidraHTTPServer {
 
     private final int port;
+    /** The front-end (project window) tool hosting the plugin. */
     private final PluginTool tool;
-    private Program program;
+    private final ProgramRegistry registry;
     private HttpServer server;
     private boolean running = false;
 
-    // Change tracking
-    private final Queue<ChangeRecord> changeHistory = new ConcurrentLinkedQueue<>();
-    private DomainObjectListener changeListener;
+    // Change tracking, per program. Keyed by identity so shared instances collapse.
+    private final Map<Program, Queue<ChangeRecord>> changeHistory = new IdentityHashMap<>();
+    private final Map<Program, DomainObjectListener> changeListeners = new IdentityHashMap<>();
 
-    public GhidraHTTPServer(int port, PluginTool tool, Program program) {
+    public GhidraHTTPServer(int port, PluginTool tool, ProgramRegistry registry) {
         this.port = port;
         this.tool = tool;
-        this.program = program;
+        this.registry = registry;
     }
 
     public void start() throws IOException {
@@ -65,11 +69,6 @@ public class GhidraHTTPServer {
         server.start();
         running = true;
         Msg.info(this, "GhidraHTTP server started on port " + port);
-
-        // Start change tracking
-        if (program != null) {
-            setupChangeListener();
-        }
     }
 
     public void stop() {
@@ -78,43 +77,106 @@ public class GhidraHTTPServer {
             running = false;
             Msg.info(this, "GhidraHTTP server stopped");
         }
-        if (changeListener != null && program != null) {
-            program.removeListener(changeListener);
-        }
+        clearTracking();
     }
 
     public boolean isRunning() {
         return running;
     }
 
-    public void setProgram(Program program) {
-        // Remove listener from old program
-        if (this.program != null && changeListener != null) {
-            this.program.removeListener(changeListener);
+    public ProgramRegistry getRegistry() {
+        return registry;
+    }
+
+    // ---- program resolution ----
+
+    /**
+     * Resolve the program a request is about. Looks for a "program" parameter in the parsed
+     * params (query string or form body) and falls back to the query string for POSTs. On
+     * failure sends an error response and returns null, so callers can simply return.
+     */
+    private Program resolveProgram(HttpExchange exchange, Map<String, String> params) throws IOException {
+        String spec = params != null ? params.get("program") : null;
+        if (spec == null || spec.isEmpty()) {
+            spec = parseQueryString(exchange.getRequestURI().getQuery()).get("program");
         }
-
-        this.program = program;
-
-        // Add listener to new program
-        if (program != null) {
-            setupChangeListener();
+        try {
+            Program program = registry.resolve(spec);
+            trackProgram(program);
+            return program;
+        } catch (ProgramRegistry.ResolveException e) {
+            sendError(exchange, e.status, e.getMessage());
+            return null;
         }
     }
 
-    private void setupChangeListener() {
-        changeListener = new DomainObjectListener() {
-            @Override
-            public void domainObjectChanged(DomainObjectChangedEvent ev) {
+    /** Find a running CodeBrowser-style tool that can navigate the given program. */
+    private GoToService findGoToService(Program program) {
+        PluginTool t = registry.toolFor(program);
+        return t != null ? t.getService(GoToService.class) : null;
+    }
+
+    /** Data type manager service from any running CodeBrowser, so open archives are visible. */
+    private DataTypeManagerService findDataTypeManagerService(Program program) {
+        PluginTool t = registry.toolFor(program);
+        if (t == null) {
+            t = registry.toolFor(null);
+        }
+        return t != null ? t.getService(DataTypeManagerService.class) : null;
+    }
+
+    // ---- change tracking ----
+
+    private void trackProgram(Program program) {
+        synchronized (changeHistory) {
+            if (changeListeners.containsKey(program)) {
+                return;
+            }
+            Queue<ChangeRecord> history = new ConcurrentLinkedQueue<>();
+            DomainObjectListener listener = ev -> {
                 for (int i = 0; i < ev.numRecords(); i++) {
-                    DomainObjectChangeRecord record = ev.getChangeRecord(i);
-                    processChangeRecord(record);
+                    processChangeRecord(history, ev.getChangeRecord(i));
+                }
+            };
+            program.addListener(listener);
+            program.addCloseListener(dobj -> untrackProgram(program));
+            changeHistory.put(program, history);
+            changeListeners.put(program, listener);
+        }
+    }
+
+    private void untrackProgram(Program program) {
+        synchronized (changeHistory) {
+            DomainObjectListener listener = changeListeners.remove(program);
+            changeHistory.remove(program);
+            if (listener != null && !program.isClosed()) {
+                program.removeListener(listener);
+            }
+        }
+    }
+
+    /** Drop all change listeners and history. */
+    public void clearTracking() {
+        synchronized (changeHistory) {
+            for (Map.Entry<Program, DomainObjectListener> e : changeListeners.entrySet()) {
+                Program p = e.getKey();
+                if (!p.isClosed()) {
+                    p.removeListener(e.getValue());
                 }
             }
-        };
-        program.addListener(changeListener);
+            changeListeners.clear();
+            changeHistory.clear();
+        }
     }
 
-    private void processChangeRecord(DomainObjectChangeRecord record) {
+    private Queue<ChangeRecord> historyFor(Program program) {
+        synchronized (changeHistory) {
+            Queue<ChangeRecord> q = changeHistory.get(program);
+            return q != null ? q : new ConcurrentLinkedQueue<>();
+        }
+    }
+
+    private void processChangeRecord(Queue<ChangeRecord> history, DomainObjectChangeRecord record) {
         long timestamp = System.currentTimeMillis();
         EventType eventType = record.getEventType();
         String changeType = eventType.toString().toLowerCase();
@@ -129,12 +191,11 @@ public class GhidraHTTPServer {
                 newValue != null ? newValue.toString() : "null");
         }
 
-        ChangeRecord cr = new ChangeRecord(timestamp, changeType, address, details);
-        changeHistory.add(cr);
+        history.add(new ChangeRecord(timestamp, changeType, address, details));
 
         // Keep only last 1000 changes
-        while (changeHistory.size() > 1000) {
-            changeHistory.poll();
+        while (history.size() > 1000) {
+            history.poll();
         }
     }
 
@@ -200,6 +261,13 @@ public class GhidraHTTPServer {
         server.createContext("/set_decompiler_comment", new SetDecompilerCommentHandler());
         server.createContext("/set_disassembly_comment", new SetDisassemblyCommentHandler());
 
+        // Program / project management endpoints
+        server.createContext("/list_programs", new ListProgramsHandler());
+        server.createContext("/list_project", new ListProjectHandler());
+        server.createContext("/open_program", new OpenProgramHandler());
+        server.createContext("/close_program", new CloseProgramHandler());
+        server.createContext("/save_program", new SaveProgramHandler());
+
         // Health check
         server.createContext("/health", exchange -> {
             String response = "OK";
@@ -250,7 +318,7 @@ public class GhidraHTTPServer {
         sendResponse(exchange, statusCode, "Error: " + message);
     }
 
-    private Address parseAddress(String addressStr) {
+    private Address parseAddress(Program program, String addressStr) {
         if (program == null) {
             return null;
         }
@@ -267,7 +335,7 @@ public class GhidraHTTPServer {
         }
     }
 
-    private String decompileFunction(Function function) {
+    private String decompileFunction(Program program, Function function) {
         if (function == null) {
             return "Function not found";
         }
@@ -286,7 +354,7 @@ public class GhidraHTTPServer {
         }
     }
 
-    private String disassembleFunction(Function function) {
+    private String disassembleFunction(Program program, Function function) {
         if (function == null) {
             return "Function not found";
         }
@@ -325,25 +393,25 @@ public class GhidraHTTPServer {
     private class DecompileFunctionHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String addressStr = params.get("address");
             if (addressStr == null) {
                 sendError(exchange, 400, "Missing 'address' parameter");
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
             }
 
             Function function = program.getFunctionManager().getFunctionContaining(address);
-            String result = decompileFunction(function);
+            String result = decompileFunction(program, function);
             sendResponse(exchange, 200, result);
         }
     }
@@ -351,25 +419,25 @@ public class GhidraHTTPServer {
     private class DisassembleFunctionHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String addressStr = params.get("address");
             if (addressStr == null) {
                 sendError(exchange, 400, "Missing 'address' parameter");
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
             }
 
             Function function = program.getFunctionManager().getFunctionContaining(address);
-            String result = disassembleFunction(function);
+            String result = disassembleFunction(program, function);
             sendResponse(exchange, 200, result);
         }
     }
@@ -377,18 +445,18 @@ public class GhidraHTTPServer {
     private class GetFunctionByAddressHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String addressStr = params.get("address");
             if (addressStr == null) {
                 sendError(exchange, 400, "Missing 'address' parameter");
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -406,20 +474,21 @@ public class GhidraHTTPServer {
     private class GetCurrentFunctionHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
 
-            GoToService goToService = tool.getService(GoToService.class);
+            GoToService goToService = findGoToService(program);
             if (goToService == null) {
-                sendError(exchange, 503, "GoTo service not available");
+                sendError(exchange, 503, "No CodeBrowser window has this program open");
                 return;
             }
 
             ProgramLocation location = goToService.getDefaultNavigatable().getLocation();
-            if (location == null) {
-                sendError(exchange, 404, "No current location");
+            if (location == null || location.getProgram() != program) {
+                sendError(exchange, 404, "No current location in this program");
                 return;
             }
 
@@ -436,15 +505,21 @@ public class GhidraHTTPServer {
     private class GetCurrentAddressHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            GoToService goToService = tool.getService(GoToService.class);
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
+
+            GoToService goToService = findGoToService(program);
             if (goToService == null) {
-                sendError(exchange, 503, "GoTo service not available");
+                sendError(exchange, 503, "No CodeBrowser window has this program open");
                 return;
             }
 
             ProgramLocation location = goToService.getDefaultNavigatable().getLocation();
-            if (location == null) {
-                sendError(exchange, 404, "No current location");
+            if (location == null || location.getProgram() != program) {
+                sendError(exchange, 404, "No current location in this program");
                 return;
             }
 
@@ -455,8 +530,9 @@ public class GhidraHTTPServer {
     private class ListFunctionsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
 
@@ -476,11 +552,11 @@ public class GhidraHTTPServer {
     private class XrefsToHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String addressStr = params.get("address");
             if (addressStr == null) {
                 sendError(exchange, 400, "Missing 'address' parameter");
@@ -494,7 +570,7 @@ public class GhidraHTTPServer {
                 } catch (NumberFormatException ignored) {}
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -525,11 +601,11 @@ public class GhidraHTTPServer {
     private class XrefsFromHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String addressStr = params.get("address");
             if (addressStr == null) {
                 sendError(exchange, 400, "Missing 'address' parameter");
@@ -543,7 +619,7 @@ public class GhidraHTTPServer {
                 } catch (NumberFormatException ignored) {}
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -574,11 +650,11 @@ public class GhidraHTTPServer {
     private class StringsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 100;
             if (params.containsKey("limit")) {
@@ -615,11 +691,11 @@ public class GhidraHTTPServer {
     private class SearchFunctionsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String query = params.get("query");
             if (query == null || query.isEmpty()) {
                 sendError(exchange, 400, "Missing 'query' parameter");
@@ -659,6 +735,10 @@ public class GhidraHTTPServer {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
 
             long since = 0;
             if (params.containsKey("since")) {
@@ -677,7 +757,7 @@ public class GhidraHTTPServer {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            for (ChangeRecord record : changeHistory) {
+            for (ChangeRecord record : historyFor(program)) {
                 if (record.timestamp > since && count < limit) {
                     sb.append(String.format("[%d] %s at %s\n",
                         record.timestamp,
@@ -707,12 +787,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("function_address");
             String prototype = params.get("prototype");
 
@@ -721,7 +801,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -737,7 +817,7 @@ public class GhidraHTTPServer {
                 int txId = program.startTransaction("Set function prototype");
                 try {
                     // Parse and apply the prototype
-                    ghidra.program.model.listing.FunctionSignature sig = parseSignature(prototype, function);
+                    ghidra.program.model.listing.FunctionSignature sig = parseSignature(program, prototype, function);
                     ghidra.app.cmd.function.ApplyFunctionSignatureCmd cmd =
                         new ghidra.app.cmd.function.ApplyFunctionSignatureCmd(
                             function.getEntryPoint(),
@@ -759,10 +839,10 @@ public class GhidraHTTPServer {
             }
         }
 
-        private ghidra.program.model.listing.FunctionSignature parseSignature(String prototype, Function function)
+        private ghidra.program.model.listing.FunctionSignature parseSignature(Program program, String prototype, Function function)
                 throws Exception {
             // Get DataTypeManagerService from tool for access to open archives
-            DataTypeManagerService dtms = tool.getService(DataTypeManagerService.class);
+            DataTypeManagerService dtms = findDataTypeManagerService(program);
 
             // Use CParserUtils with handleExceptions=false to throw instead of showing dialog
             ghidra.program.model.data.FunctionDefinitionDataType sig =
@@ -783,12 +863,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("function_address");
             String newName = params.get("new_name");
 
@@ -797,7 +877,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -832,12 +912,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("function_address");
             String varName = params.get("variable_name");
             String newType = params.get("new_type");
@@ -847,7 +927,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -908,12 +988,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String comment = params.get("comment");
 
@@ -922,7 +1002,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -955,12 +1035,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String comment = params.get("comment");
 
@@ -969,7 +1049,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -1000,11 +1080,11 @@ public class GhidraHTTPServer {
     private class ListTypesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             String category = params.get("category");
             int limit = 1000;
@@ -1039,11 +1119,11 @@ public class GhidraHTTPServer {
     private class GetTypeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String name = params.get("name");
             if (name == null) {
                 sendError(exchange, 400, "Missing 'name' parameter");
@@ -1065,11 +1145,11 @@ public class GhidraHTTPServer {
     private class SearchTypesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String query = params.get("query");
             if (query == null || query.isEmpty()) {
                 sendError(exchange, 400, "Missing 'query' parameter");
@@ -1112,12 +1192,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String name = params.get("name");
             String kind = params.get("kind"); // struct, union, typedef, enum
             String definition = params.get("definition");
@@ -1196,12 +1276,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String name = params.get("name");
             String definition = params.get("definition");
             String newName = params.get("new_name");
@@ -1274,11 +1354,11 @@ public class GhidraHTTPServer {
     private class ListEquatesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 1000;
             if (params.containsKey("limit")) {
@@ -1309,11 +1389,11 @@ public class GhidraHTTPServer {
     private class GetEquateHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             String name = params.get("name");
             String valueStr = params.get("value");
 
@@ -1354,12 +1434,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String name = params.get("name");
             String valueStr = params.get("value");
             String addressStr = params.get("address");
@@ -1390,7 +1470,7 @@ public class GhidraHTTPServer {
 
                     // If address is provided, apply equate at that location
                     if (addressStr != null) {
-                        Address addr = parseAddress(addressStr);
+                        Address addr = parseAddress(program, addressStr);
                         if (addr == null) {
                             program.endTransaction(txId, false);
                             sendError(exchange, 400, "Invalid address: " + addressStr);
@@ -1424,12 +1504,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String name = params.get("name");
             String addressStr = params.get("address");
             String operandStr = params.get("operand");
@@ -1453,7 +1533,7 @@ public class GhidraHTTPServer {
 
                     if (addressStr != null) {
                         // Remove reference at specific address
-                        Address addr = parseAddress(addressStr);
+                        Address addr = parseAddress(program, addressStr);
                         if (addr == null) {
                             program.endTransaction(txId, false);
                             sendError(exchange, 400, "Invalid address: " + addressStr);
@@ -1489,11 +1569,11 @@ public class GhidraHTTPServer {
     private class ListLabelsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             String addressStr = params.get("address");
             int limit = 1000;
@@ -1509,7 +1589,7 @@ public class GhidraHTTPServer {
 
             if (addressStr != null) {
                 // List labels at specific address
-                Address address = parseAddress(addressStr);
+                Address address = parseAddress(program, addressStr);
                 if (address == null) {
                     sendError(exchange, 400, "Invalid address: " + addressStr);
                     return;
@@ -1548,12 +1628,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String labelName = params.get("name");
             String scope = params.get("scope"); // "global" or "local" (function-scoped)
@@ -1563,7 +1643,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -1607,12 +1687,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String labelName = params.get("name");
 
@@ -1621,7 +1701,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -1679,11 +1759,11 @@ public class GhidraHTTPServer {
     private class ListNamespacesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 1000;
             if (params.containsKey("limit")) {
@@ -1722,11 +1802,11 @@ public class GhidraHTTPServer {
     private class ListClassesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 1000;
             if (params.containsKey("limit")) {
@@ -1765,11 +1845,11 @@ public class GhidraHTTPServer {
     private class ListImportsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 1000;
             if (params.containsKey("limit")) {
@@ -1809,11 +1889,11 @@ public class GhidraHTTPServer {
     private class ListExportsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             int limit = 1000;
             if (params.containsKey("limit")) {
@@ -1853,11 +1933,11 @@ public class GhidraHTTPServer {
     private class ReadMemoryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             String addressStr = params.get("address");
             String lengthStr = params.get("length");
@@ -1867,7 +1947,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -1956,11 +2036,11 @@ public class GhidraHTTPServer {
     private class GetDataHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
 
             String addressStr = params.get("address");
             if (addressStr == null) {
@@ -1968,7 +2048,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -2018,12 +2098,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String typeName = params.get("type");
 
@@ -2032,7 +2112,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -2078,12 +2158,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String lengthStr = params.get("length");
 
@@ -2092,7 +2172,7 @@ public class GhidraHTTPServer {
                 return;
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -2131,8 +2211,9 @@ public class GhidraHTTPServer {
     private class ProgramInfoHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
 
@@ -2155,12 +2236,12 @@ public class GhidraHTTPServer {
     private class ListMemoryBlocksHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
 
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             int limit = 1000;
             String limitStr = params.get("limit");
             if (limitStr != null) {
@@ -2202,12 +2283,12 @@ public class GhidraHTTPServer {
     private class ListBookmarksHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
             if (program == null) {
-                sendError(exchange, 503, "No program loaded");
                 return;
             }
 
-            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
             int limit = 1000;
             String limitStr = params.get("limit");
             if (limitStr != null) {
@@ -2251,12 +2332,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String type = params.get("type");
             String category = params.get("category");
@@ -2276,7 +2357,7 @@ public class GhidraHTTPServer {
                 comment = "";
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -2306,12 +2387,12 @@ public class GhidraHTTPServer {
                 sendError(exchange, 405, "Method not allowed");
                 return;
             }
-            if (program == null) {
-                sendError(exchange, 503, "No program loaded");
-                return;
-            }
 
             Map<String, String> params = parseFormData(exchange);
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
             String addressStr = params.get("address");
             String type = params.get("type");
             String category = params.get("category");
@@ -2327,7 +2408,7 @@ public class GhidraHTTPServer {
                 category = "";
             }
 
-            Address address = parseAddress(addressStr);
+            Address address = parseAddress(program, addressStr);
             if (address == null) {
                 sendError(exchange, 400, "Invalid address: " + addressStr);
                 return;
@@ -2682,6 +2763,171 @@ public class GhidraHTTPServer {
     }
 
     // Inner class for change tracking
+    // Program / project management handlers
+
+    private String formatOpenProgram(ProgramRegistry.OpenProgram row) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(row.path);
+        sb.append('\t').append(row.program.getName());
+        List<String> flags = new ArrayList<>();
+        if (row.activeInTool) {
+            flags.add("active");
+        }
+        if (row.openedByServer) {
+            flags.add("server");
+        }
+        for (String t : row.tools) {
+            flags.add("tool:" + t);
+        }
+        if (row.program.isChanged()) {
+            flags.add("modified");
+        }
+        sb.append('\t').append(String.join(",", flags));
+        return sb.toString();
+    }
+
+    private class ListProgramsHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            StringBuilder sb = new StringBuilder();
+            List<ProgramRegistry.OpenProgram> rows = registry.listOpen();
+            for (ProgramRegistry.OpenProgram row : rows) {
+                sb.append(formatOpenProgram(row)).append('\n');
+            }
+            if (rows.isEmpty()) {
+                sb.append("No programs open");
+            }
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class ListProjectHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = parseQueryString(exchange.getRequestURI().getQuery());
+            String folder = params.get("folder");
+            boolean recursive = !"false".equalsIgnoreCase(params.get("recursive"));
+            boolean programsOnly = "true".equalsIgnoreCase(params.get("programs_only"));
+
+            List<DomainFile> files;
+            try {
+                files = registry.listProjectFiles(folder, recursive);
+            } catch (ProgramRegistry.ResolveException e) {
+                sendError(exchange, e.status, e.getMessage());
+                return;
+            }
+
+            ghidra.framework.model.Project project = registry.getProject();
+            StringBuilder sb = new StringBuilder();
+            if (project != null) {
+                sb.append("Project: ").append(project.getName()).append('\n');
+            }
+            int count = 0;
+            for (DomainFile df : files) {
+                boolean isProgram = ProgramRegistry.isProgramFile(df);
+                if (programsOnly && !isProgram) {
+                    continue;
+                }
+                sb.append(df.getPathname())
+                  .append('\t').append(df.getContentType())
+                  .append('\t').append(df.isOpen() ? "open" : "closed")
+                  .append('\n');
+                count++;
+            }
+            if (count == 0) {
+                sb.append("No files found");
+            }
+            sendResponse(exchange, 200, sb.toString());
+        }
+    }
+
+    private class OpenProgramHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = "POST".equals(exchange.getRequestMethod())
+                ? parseFormData(exchange)
+                : parseQueryString(exchange.getRequestURI().getQuery());
+            String spec = params.get("program");
+            if (spec == null || spec.isEmpty()) {
+                sendError(exchange, 400, "Missing 'program' parameter");
+                return;
+            }
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
+
+            boolean visible = "true".equalsIgnoreCase(params.get("visible"));
+            String where = "server";
+            if (visible) {
+                where = showInTool(program);
+            }
+            sendResponse(exchange, 200, "Opened " + ProgramRegistry.pathOf(program) + " (" + where + ")");
+        }
+
+        /** Show the program in a running CodeBrowser, or launch the default tool for it. */
+        private String showInTool(Program program) {
+            PluginTool t = registry.toolFor(null);
+            if (t != null) {
+                ProgramManager pm = t.getService(ProgramManager.class);
+                if (pm != null) {
+                    Swing.runNow(() -> pm.openProgram(program, ProgramManager.OPEN_CURRENT));
+                    return "tool:" + t.getName();
+                }
+            }
+            DomainFile df = program.getDomainFile();
+            if (df != null && tool.getToolServices() != null) {
+                Swing.runNow(() -> tool.getToolServices().launchDefaultTool(List.of(df)));
+                return "launched default tool";
+            }
+            return "server (no tool available)";
+        }
+    }
+
+    private class CloseProgramHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = "POST".equals(exchange.getRequestMethod())
+                ? parseFormData(exchange)
+                : parseQueryString(exchange.getRequestURI().getQuery());
+            String spec = params.get("program");
+            if (spec == null || spec.isEmpty()) {
+                sendError(exchange, 400, "Missing 'program' parameter");
+                return;
+            }
+            boolean force = "true".equalsIgnoreCase(params.get("force"));
+            try {
+                registry.close(spec, force);
+            } catch (ProgramRegistry.ResolveException e) {
+                sendError(exchange, e.status, e.getMessage());
+                return;
+            }
+            sendResponse(exchange, 200, "Closed " + spec);
+        }
+    }
+
+    private class SaveProgramHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> params = "POST".equals(exchange.getRequestMethod())
+                ? parseFormData(exchange)
+                : parseQueryString(exchange.getRequestURI().getQuery());
+            Program program = resolveProgram(exchange, params);
+            if (program == null) {
+                return;
+            }
+            boolean wasChanged = program.isChanged();
+            try {
+                registry.save(program);
+            } catch (ProgramRegistry.ResolveException e) {
+                sendError(exchange, e.status, e.getMessage());
+                return;
+            }
+            sendResponse(exchange, 200, (wasChanged ? "Saved " : "No changes to save in ") +
+                ProgramRegistry.pathOf(program));
+        }
+    }
+
     private static class ChangeRecord {
         final long timestamp;
         final String changeType;

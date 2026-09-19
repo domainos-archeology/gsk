@@ -12,6 +12,14 @@ import (
 type GhidraClient struct {
 	baseURL string
 	http    *http.Client
+
+	// program is the project path of the program requests should target.
+	// Empty means the server's default (the program active in a CodeBrowser,
+	// or the only program the server has opened).
+	program string
+
+	// allPrograms fans every request out to each program open in Ghidra.
+	allPrograms bool
 }
 
 // NewGhidraClient creates a new client for the given server address.
@@ -22,8 +30,52 @@ func NewGhidraClient(server string) *GhidraClient {
 	}
 }
 
-// get performs a GET request and returns the response body.
+// WithProgram returns the client targeting the given project path.
+func (c *GhidraClient) WithProgram(program string) *GhidraClient {
+	c.program = program
+	return c
+}
+
+// WithAllPrograms makes the client run each request against every open program.
+func (c *GhidraClient) WithAllPrograms(all bool) *GhidraClient {
+	c.allPrograms = all
+	return c
+}
+
+// withProgramParam adds program=<path> to an endpoint's query string.
+func withProgramParam(endpoint, program string) string {
+	if program == "" {
+		return endpoint
+	}
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + sep + "program=" + url.QueryEscape(program)
+}
+
+// get performs a GET request against the targeted program(s) and returns the response body.
 func (c *GhidraClient) get(endpoint string) ([]byte, error) {
+	if c.allPrograms {
+		return c.fanOut(func(program string) ([]byte, error) {
+			return c.rawGet(withProgramParam(endpoint, program))
+		})
+	}
+	return c.rawGet(withProgramParam(endpoint, c.program))
+}
+
+// post performs a POST request against the targeted program(s) and returns the response body.
+func (c *GhidraClient) post(endpoint string, data url.Values) ([]byte, error) {
+	if c.allPrograms {
+		return c.fanOut(func(program string) ([]byte, error) {
+			return c.rawPost(withProgramParam(endpoint, program), data)
+		})
+	}
+	return c.rawPost(withProgramParam(endpoint, c.program), data)
+}
+
+// rawGet performs a GET request with no program targeting.
+func (c *GhidraClient) rawGet(endpoint string) ([]byte, error) {
 	resp, err := c.http.Get(c.baseURL + endpoint)
 	if err != nil {
 		return nil, err
@@ -32,8 +84,8 @@ func (c *GhidraClient) get(endpoint string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// post performs a POST request with form data and returns the response body.
-func (c *GhidraClient) post(endpoint string, data url.Values) ([]byte, error) {
+// rawPost performs a POST request with form data and no program targeting.
+func (c *GhidraClient) rawPost(endpoint string, data url.Values) ([]byte, error) {
 	resp, err := c.http.Post(
 		c.baseURL+endpoint,
 		"application/x-www-form-urlencoded",
@@ -44,6 +96,98 @@ func (c *GhidraClient) post(endpoint string, data url.Values) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// fanOut runs fn once per open program and concatenates the results, each
+// under a "=== <path> ===" header.
+func (c *GhidraClient) fanOut(fn func(program string) ([]byte, error)) ([]byte, error) {
+	programs, err := c.OpenProgramPaths()
+	if err != nil {
+		return nil, err
+	}
+	if len(programs) == 0 {
+		return nil, fmt.Errorf("no programs open in Ghidra")
+	}
+	var out strings.Builder
+	for _, p := range programs {
+		body, err := fn(p)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		fmt.Fprintf(&out, "=== %s ===\n", p)
+		out.Write(body)
+		if len(body) > 0 && body[len(body)-1] != '\n' {
+			out.WriteByte('\n')
+		}
+	}
+	return []byte(out.String()), nil
+}
+
+// OpenProgramPaths returns the project paths of every program open in Ghidra.
+func (c *GhidraClient) OpenProgramPaths() ([]string, error) {
+	body, err := c.ListPrograms()
+	if err != nil {
+		return nil, err
+	}
+	return parseProgramPaths(string(body)), nil
+}
+
+// parseProgramPaths extracts the first column of /list_programs output.
+func parseProgramPaths(listing string) []string {
+	var paths []string
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "/") {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 2)
+		paths = append(paths, fields[0])
+	}
+	return paths
+}
+
+// Program and project management. These are never fanned out.
+
+// ListPrograms returns every program open in Ghidra (in CodeBrowsers or by the server).
+func (c *GhidraClient) ListPrograms() ([]byte, error) {
+	return c.rawGet("/list_programs")
+}
+
+// ListProject returns the files in the Ghidra project.
+func (c *GhidraClient) ListProject(folder string, recursive, programsOnly bool) ([]byte, error) {
+	q := url.Values{}
+	if folder != "" {
+		q.Set("folder", folder)
+	}
+	q.Set("recursive", fmt.Sprint(recursive))
+	q.Set("programs_only", fmt.Sprint(programsOnly))
+	return c.rawGet("/list_project?" + q.Encode())
+}
+
+// OpenProgram opens a program from the project on the server side. With visible set,
+// it is also shown in a CodeBrowser window.
+func (c *GhidraClient) OpenProgram(program string, visible bool) ([]byte, error) {
+	data := url.Values{}
+	data.Set("program", program)
+	data.Set("visible", fmt.Sprint(visible))
+	return c.rawPost("/open_program", data)
+}
+
+// CloseProgram releases the server's hold on a program.
+func (c *GhidraClient) CloseProgram(program string, force bool) ([]byte, error) {
+	data := url.Values{}
+	data.Set("program", program)
+	data.Set("force", fmt.Sprint(force))
+	return c.rawPost("/close_program", data)
+}
+
+// SaveProgram saves a program's changes to the project.
+func (c *GhidraClient) SaveProgram(program string) ([]byte, error) {
+	data := url.Values{}
+	if program != "" {
+		data.Set("program", program)
+	}
+	return c.rawPost("/save_program", data)
 }
 
 // DecompileFunction returns decompiled C pseudocode for the function at the given address.
@@ -377,7 +521,10 @@ func (c *GhidraClient) DeleteBookmark(address, bookmarkType, category string) ([
 	return c.post("/delete_bookmark", data)
 }
 
-// newClient creates a GhidraClient using the configured server address.
+// newClient creates a GhidraClient using the configured server address and
+// program targeting (--program / --all flags, .gsk.yaml, GHIDRA_PROGRAM).
 func newClient() *GhidraClient {
-	return NewGhidraClient(getGhidraServer())
+	return NewGhidraClient(getGhidraServer()).
+		WithProgram(getGhidraProgram()).
+		WithAllPrograms(getAllPrograms())
 }

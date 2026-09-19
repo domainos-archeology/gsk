@@ -4,11 +4,26 @@ You are an AI assistant helping with reverse engineering using Ghidra. You have 
 
 ## Prerequisites
 
-- Ghidra is running with the GhidraHTTP plugin loaded (server on port 8080 by default)
+- Ghidra is running with a project open and the GhidraHTTP plugin loaded in the project window (server on port 8080 by default)
 - `gsk` CLI is in PATH
 - Configure server address via `.gsk.yaml`, `--server` flag, or `GHIDRA_SERVER` env var
 
+## Choosing a program
+
+The server can operate on any program in the project, not just the one on screen. Every command takes `--program`/`-p <project path>` (or `GHIDRA_PROGRAM`, or `program:` in `.gsk.yaml`). Without it, commands use the program active in a CodeBrowser, or the only program the server has opened. If you get "No program specified and none active", run `gsk project list --programs` and pick one with `-p` or `gsk program open`.
+
+Use `--all` to run a read-only command across every open program; output is grouped under `=== /path ===` headers.
+
 ## Command Reference
+
+### Project and programs
+```bash
+gsk project list [--programs]         # files in the project
+gsk program list                      # open programs (active / server / tool:<name> / modified)
+gsk program open <path> [--visible]   # open hidden, or also show in a CodeBrowser
+gsk program save [path]               # gsk changes are not saved automatically
+gsk program close <path> [--force]
+```
 
 ### Orientation -- start here
 ```bash
@@ -110,8 +125,21 @@ gsk changes --since <timestamp>       # changes after a specific timestamp
 
 ### Starting a session
 ```bash
+gsk program list                      # what's open, and which is active
 gsk changes                           # check for manual changes made in Ghidra UI
-gsk context                           # orient yourself
+gsk context                           # orient yourself (needs the program in a CodeBrowser)
+```
+
+### Working across binaries
+```bash
+gsk --all search open_file            # find a function in every open program
+gsk -p /lib/libc.so export list       # look at another program without switching
+gsk program open /bin/cat             # bring another program into play
+```
+
+### Finishing
+```bash
+gsk program save                      # persist annotations made through gsk
 ```
 
 ### Analyzing a function
